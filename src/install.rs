@@ -15,6 +15,7 @@ pub async fn run_install() -> Result<()> {
 
     run_systemctl(&["daemon-reload"])?;
     run_systemctl(&["enable", "--now", "lox-linein-bridge"])?;
+    run_systemctl(&["restart", "lox-linein-bridge"])?;
     Ok(())
 }
 

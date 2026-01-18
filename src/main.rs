@@ -59,7 +59,10 @@ async fn run() -> Result<()> {
             config.preferred_server_name.as_deref(),
             config.preferred_server_mac.as_deref(),
         ) {
-            Ok(server) => break server,
+            Ok(server) => {
+                info!("discovered server: {}", server.base_url);
+                break server;
+            }
             Err(err) => {
                 warn!("mDNS discovery failed: {}", err);
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -80,7 +83,12 @@ async fn run() -> Result<()> {
         mac: mac.clone(),
         capture_devices: capture_devices.clone(),
     };
+    info!("registering bridge {}", config.bridge_id);
     let initial_config = api.register_bridge(&register).await?;
+    info!(
+        "registration response: assigned_input_id={:?}, capture_device={:?}",
+        initial_config.assigned_input_id, initial_config.capture_device
+    );
 
     let runtime = RuntimeConfig::from_response(initial_config);
     let (config_tx, mut config_rx) = tokio::sync::watch::channel(runtime.clone());
