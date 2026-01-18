@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
+alsa-sys = "0.3"
 cpal = "0.15"
 dialoguer = "0.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -16,3 +17,6 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 url = "2.5"
+
+[build-dependencies]
+cc = "1.2"

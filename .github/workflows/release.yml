@@ -76,6 +76,8 @@ jobs:
         run: cargo install cross --locked
       - name: Build
         run: cross build --release --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: "-C strip=symbols"
       - name: Package
         run: |
           version="${{ steps.resolve_tag.outputs.tag }}"

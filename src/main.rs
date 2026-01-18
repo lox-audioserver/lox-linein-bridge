@@ -1,4 +1,5 @@
 mod audio;
+mod alsa_silence;
 mod config;
 mod health;
 mod install;
@@ -13,12 +14,14 @@ use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    alsa_silence::init();
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         print_usage();
-        anyhow::bail!("missing command");
+        eprintln!();
+        anyhow::bail!("missing command (see usage above)");
     }
 
     match args[1].as_str() {
@@ -59,6 +62,8 @@ async fn run() -> Result<()> {
             models::IngestTarget {
                 ingest_tcp_host: host,
                 ingest_tcp_port: 7080,
+                vad_threshold_db: None,
+                vad_hold_ms: None,
             }
         }
     };
@@ -91,12 +96,17 @@ async fn run() -> Result<()> {
                     stream,
                 } = session;
                 let _stream_guard = stream;
+                let vad_threshold_db = ingest.vad_threshold_db.unwrap_or(-45.0);
+                let vad_hold_ms = ingest.vad_hold_ms.unwrap_or(1500);
+
                 if let Err(err) = stream::stream_audio(
                     &config.linein_id,
                     &ingest.ingest_tcp_host,
                     ingest.ingest_tcp_port,
                     receiver,
                     error_receiver,
+                    vad_threshold_db,
+                    std::time::Duration::from_millis(vad_hold_ms),
                     status.clone(),
                 )
                 .await
@@ -122,6 +132,10 @@ fn print_usage() {
     eprintln!("  lox-linein-bridge run");
     eprintln!("  lox-linein-bridge --help");
     eprintln!("  lox-linein-bridge --version");
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  lox-linein-bridge install --server http://192.168.1.209:7090");
+    eprintln!("  lox-linein-bridge run");
 }
 
 struct Backoff {

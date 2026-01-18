@@ -1,10 +1,11 @@
 use crate::models::StatusSnapshot;
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tracing::info;
 
 #[derive(Clone)]
 pub struct StatusHandle {
@@ -90,10 +91,13 @@ pub async fn stream_audio(
     ingest_port: u16,
     mut rx: mpsc::Receiver<Vec<u8>>,
     mut err_rx: mpsc::Receiver<String>,
+    threshold_db: f32,
+    hold_duration: Duration,
     status: StatusHandle,
 ) -> Result<()> {
     let mut backoff = Backoff::new();
     let addr = format!("{}:{}", ingest_host, ingest_port);
+    let mut gate = VadGate::new();
 
     let mut stream: Option<TcpStream> = None;
     loop {
@@ -118,11 +122,35 @@ pub async fn stream_audio(
             maybe_chunk = rx.recv() => {
                 match maybe_chunk {
                     Some(chunk) => {
+                        if let Some(rms_db) = rms_db_from_pcm_i16_le(&chunk) {
+                            let now = Instant::now();
+                            let was_active = gate.active;
+                            if rms_db >= threshold_db {
+                                gate.set_active(now);
+                            } else if gate.should_keep_active(now, hold_duration) {
+                                gate.touch(now);
+                            } else {
+                                gate.set_inactive();
+                            }
+
+                            if gate.active && !was_active {
+                                info!("vad: active (rms_db={:.1})", rms_db);
+                            } else if !gate.active && was_active {
+                                info!("vad: idle (rms_db={:.1})", rms_db);
+                            }
+                        }
+
+                        if !gate.active {
+                            status.set_state("IDLE");
+                            continue;
+                        }
+
                         if let Some(writer) = stream.as_mut() {
                             if let Err(err) = writer.write_all(&chunk).await {
                                 status.set_last_error(Some(err.to_string()));
                                 stream = None;
                             } else {
+                                status.set_state("STREAMING");
                                 status.record_bytes(chunk.len());
                             }
                         }
@@ -177,4 +205,60 @@ impl Backoff {
         self.current = std::cmp::min(self.current * 2, Duration::from_secs(30));
         delay
     }
+}
+
+struct VadGate {
+    active: bool,
+    last_active: Option<Instant>,
+}
+
+impl VadGate {
+    fn new() -> Self {
+        Self {
+            active: false,
+            last_active: None,
+        }
+    }
+
+    fn set_active(&mut self, now: Instant) {
+        self.active = true;
+        self.last_active = Some(now);
+    }
+
+    fn touch(&mut self, now: Instant) {
+        self.last_active = Some(now);
+    }
+
+    fn set_inactive(&mut self) {
+        self.active = false;
+    }
+
+    fn should_keep_active(&self, now: Instant, hold: Duration) -> bool {
+        match self.last_active {
+            Some(ts) => now.duration_since(ts) <= hold,
+            None => false,
+        }
+    }
+}
+
+fn rms_db_from_pcm_i16_le(bytes: &[u8]) -> Option<f32> {
+    let mut sum = 0f64;
+    let mut count = 0u64;
+    for chunk in bytes.chunks_exact(2) {
+        let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+        let normalized = sample as f64 / i16::MAX as f64;
+        sum += normalized * normalized;
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    let mean = sum / count as f64;
+    let rms = mean.sqrt();
+    let db = if rms <= 0.0 {
+        -100.0
+    } else {
+        20.0 * rms.log10()
+    };
+    Some(db as f32)
 }

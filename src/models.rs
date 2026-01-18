@@ -10,6 +10,8 @@ pub struct LineIn {
 pub struct IngestTarget {
     pub ingest_tcp_host: String,
     pub ingest_tcp_port: u16,
+    pub vad_threshold_db: Option<f32>,
+    pub vad_hold_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
