@@ -15,7 +15,9 @@ use tracing::{info, warn};
 #[tokio::main]
 async fn main() -> Result<()> {
     alsa_silence::init();
-    tracing_subscriber::fmt().with_env_filter("info").init();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -69,6 +71,13 @@ async fn run() -> Result<()> {
     };
 
     let ingest_addr = format!("{}:{}", ingest.ingest_tcp_host, ingest.ingest_tcp_port);
+    let vad_threshold_db = ingest.vad_threshold_db.unwrap_or(-45.0);
+    let vad_hold_ms = ingest.vad_hold_ms.unwrap_or(2000);
+    info!("capture device: {}", config.capture_device);
+    info!(
+        "ingest target {} (vad_threshold_db={}, vad_hold_ms={})",
+        ingest_addr, vad_threshold_db, vad_hold_ms
+    );
     let status = stream::StatusHandle::new(&config.capture_device, &ingest_addr);
     health::spawn(status.clone());
 
@@ -96,9 +105,6 @@ async fn run() -> Result<()> {
                     stream,
                 } = session;
                 let _stream_guard = stream;
-                let vad_threshold_db = ingest.vad_threshold_db.unwrap_or(-45.0);
-                let vad_hold_ms = ingest.vad_hold_ms.unwrap_or(1500);
-
                 let params = stream::StreamParams {
                     linein_id: &config.linein_id,
                     ingest_host: &ingest.ingest_tcp_host,

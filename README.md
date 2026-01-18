@@ -45,7 +45,7 @@ To reduce bandwidth, the bridge uses a simple RMS-based gate. It only streams wh
 
 Tuning comes from the server's line-in ingest settings:
 - `vad_threshold_db` (default: `-45.0` when unset)
-- `vad_hold_ms` (default: `1500` when unset)
+- `vad_hold_ms` (default: `2000` when unset)
 
 Example `GET /api/linein/{id}/ingest` response:
 ```json
@@ -54,7 +54,7 @@ Example `GET /api/linein/{id}/ingest` response:
   "ingest_tcp_host": "192.168.1.209",
   "ingest_tcp_port": 7080,
   "vad_threshold_db": -45.0,
-  "vad_hold_ms": 3000
+  "vad_hold_ms": 2000
 }
 ```
 

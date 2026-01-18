@@ -130,15 +130,15 @@ pub async fn stream_audio(mut params: StreamParams<'_>) -> Result<()> {
                             if rms_db >= params.threshold_db {
                                 gate.set_active(now);
                             } else if gate.should_keep_active(now, params.hold_duration) {
-                                gate.touch(now);
+                                // Keep active during hold window without extending it.
                             } else {
                                 gate.set_inactive();
                             }
 
                             if gate.active && !was_active {
-                                info!("vad: active (rms_db={:.1})", rms_db);
+                                info!("audio detected, streaming (rms_db={:.1})", rms_db);
                             } else if !gate.active && was_active {
-                                info!("vad: idle (rms_db={:.1})", rms_db);
+                                info!("silence detected, pausing stream (rms_db={:.1})", rms_db);
                             }
                         }
 
