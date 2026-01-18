@@ -1,3 +1,15 @@
+# [1.3.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.2.0...v1.3.0) (2026-01-18)
+
+
+### Bug Fixes
+
+* force ALSA host for input device discovery ([1fa109b](https://github.com/lox-audioserver/lox-linein-bridge/commit/1fa109b479dfd04aec1137138e6f94ba132be7f7))
+
+
+### Features
+
+* switch to bridge-based discovery/registration with server-driven config and systemd install ([ff4e1fb](https://github.com/lox-audioserver/lox-linein-bridge/commit/ff4e1fb06ac76d714c9bfff8f644a77792c72a8f))
+
 # [1.2.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.1.0...v1.2.0) (2026-01-18)
 
 
