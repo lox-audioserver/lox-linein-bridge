@@ -24,13 +24,19 @@ jobs:
   release:
     runs-on: ubuntu-latest
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    continue-on-error: ${{ matrix.allow_failure }}
     strategy:
+      fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-          - armv7-unknown-linux-gnueabihf
-          - arm-unknown-linux-gnueabihf
+        include:
+          - target: x86_64-unknown-linux-gnu
+            allow_failure: false
+          - target: aarch64-unknown-linux-gnu
+            allow_failure: false
+          - target: armv7-unknown-linux-gnueabihf
+            allow_failure: false
+          - target: arm-unknown-linux-gnueabihf
+            allow_failure: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -76,8 +82,6 @@ jobs:
         run: cargo install cross --locked
       - name: Build
         run: cross build --release --target ${{ matrix.target }}
-        env:
-          RUSTFLAGS: "-C strip=symbols"
       - name: Package
         run: |
           version="${{ steps.resolve_tag.outputs.tag }}"
