@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  release:
+    types: [published]
+  workflow_run:
+    workflows: ["Semantic Release"]
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (vX.Y.Z). Leave empty to use latest release."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+          - arm-unknown-linux-gnueabihf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install ALSA dev libs
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - name: Resolve release tag
+        id: resolve_tag
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+          
+          event_name = os.environ.get("GITHUB_EVENT_NAME")
+          input_tag = os.environ.get("INPUT_TAG", "").strip()
+          
+          if event_name == "release":
+              tag = os.environ.get("GITHUB_REF_NAME", "")
+          elif input_tag:
+              tag = input_tag
+          else:
+              repo = os.environ["GITHUB_REPOSITORY"]
+              url = f"https://api.github.com/repos/{repo}/releases/latest"
+              req = urllib.request.Request(url)
+              token = os.environ.get("GITHUB_TOKEN", "")
+              if token:
+                  req.add_header("Authorization", f"Bearer {token}")
+              with urllib.request.urlopen(req) as resp:
+                  data = json.load(resp)
+              tag = data.get("tag_name", "")
+          
+          if not tag:
+              print("Could not resolve release tag", file=sys.stderr)
+              sys.exit(1)
+          
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"tag={tag}\n")
+          PY
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Build
+        run: cross build --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          version="${{ steps.resolve_tag.outputs.tag }}"
+          version="${version#v}"
+          bin_dir="target/${{ matrix.target }}/release"
+          tar -czf "lox-linein-bridge-${version}-${{ matrix.target }}.tar.gz" -C "${bin_dir}" lox-linein-bridge
+      - name: Upload Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve_tag.outputs.tag }}
+          files: lox-linein-bridge-*.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true

@@ -1,0 +1,4 @@
+server_url = "http://192.168.1.209:7090"
+linein_id = "linein-mke63267"
+capture_device = "hw:1,0"
+

@@ -1,0 +1,180 @@
+use crate::models::StatusSnapshot;
+use anyhow::{Context, Result};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+
+#[derive(Clone)]
+pub struct StatusHandle {
+    inner: Arc<Mutex<StatusState>>,
+}
+
+struct StatusState {
+    state: String,
+    device: String,
+    ingest: String,
+    last_error: Option<String>,
+    bytes_sent_total: u64,
+    last_chunk_ts: Option<String>,
+}
+
+impl StatusHandle {
+    pub fn new(device: &str, ingest: &str) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(StatusState {
+                state: "RECONNECTING".to_string(),
+                device: device.to_string(),
+                ingest: ingest.to_string(),
+                last_error: None,
+                bytes_sent_total: 0,
+                last_chunk_ts: None,
+            })),
+        }
+    }
+
+    pub fn set_state(&self, state: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.state = state.to_string();
+        }
+    }
+
+    pub fn set_last_error(&self, error: Option<String>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.last_error = error;
+        }
+    }
+
+    pub fn snapshot(&self) -> StatusSnapshot {
+        let inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        StatusSnapshot {
+            ts: crate::timestamp::now_rfc3339(),
+            state: inner.state.clone(),
+            device: inner.device.clone(),
+            ingest: inner.ingest.clone(),
+            last_error: inner.last_error.clone(),
+        }
+    }
+
+    pub fn record_bytes(&self, bytes: usize) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.bytes_sent_total = inner.bytes_sent_total.saturating_add(bytes as u64);
+            inner.last_chunk_ts = Some(crate::timestamp::now_rfc3339());
+        }
+    }
+
+    pub fn health_snapshot(&self) -> crate::health::HealthSnapshot {
+        let inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        crate::health::HealthSnapshot {
+            ts: crate::timestamp::now_rfc3339(),
+            state: inner.state.clone(),
+            device: inner.device.clone(),
+            ingest: inner.ingest.clone(),
+            last_error: inner.last_error.clone(),
+            bytes_sent_total: inner.bytes_sent_total,
+            last_chunk_ts: inner.last_chunk_ts.clone(),
+        }
+    }
+}
+
+pub async fn stream_audio(
+    linein_id: &str,
+    ingest_host: &str,
+    ingest_port: u16,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    mut err_rx: mpsc::Receiver<String>,
+    status: StatusHandle,
+) -> Result<()> {
+    let mut backoff = Backoff::new();
+    let addr = format!("{}:{}", ingest_host, ingest_port);
+
+    let mut stream: Option<TcpStream> = None;
+    loop {
+        if stream.is_none() {
+            status.set_state("RECONNECTING");
+            match connect(&addr, linein_id).await {
+                Ok(connected) => {
+                    stream = Some(connected);
+                    status.set_state("STREAMING");
+                    status.set_last_error(None);
+                    backoff.reset();
+                }
+                Err(err) => {
+                    status.set_last_error(Some(err.to_string()));
+                    tokio::time::sleep(backoff.next_delay()).await;
+                    continue;
+                }
+            }
+        }
+
+        tokio::select! {
+            maybe_chunk = rx.recv() => {
+                match maybe_chunk {
+                    Some(chunk) => {
+                        if let Some(writer) = stream.as_mut() {
+                            if let Err(err) = writer.write_all(&chunk).await {
+                                status.set_last_error(Some(err.to_string()));
+                                stream = None;
+                            } else {
+                                status.record_bytes(chunk.len());
+                            }
+                        }
+                    }
+                    None => {
+                        return Err(anyhow::anyhow!("audio capture channel closed"));
+                    }
+                }
+            }
+            maybe_err = err_rx.recv() => {
+                let message = match maybe_err {
+                    Some(message) => message,
+                    None => "audio capture error channel closed".to_string(),
+                };
+                status.set_last_error(Some(message.clone()));
+                return Err(anyhow::anyhow!(message));
+            }
+        }
+    }
+}
+
+async fn connect(addr: &str, linein_id: &str) -> Result<TcpStream> {
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .with_context(|| format!("connect to {}", addr))?;
+    stream.set_nodelay(true).context("set TCP nodelay")?;
+    let header = format!("{}\n", linein_id);
+    stream
+        .write_all(header.as_bytes())
+        .await
+        .context("send line-in id")?;
+    Ok(stream)
+}
+
+struct Backoff {
+    current: Duration,
+}
+
+impl Backoff {
+    fn new() -> Self {
+        Self {
+            current: Duration::from_secs(1),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.current = Duration::from_secs(1);
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let delay = self.current;
+        self.current = std::cmp::min(self.current * 2, Duration::from_secs(30));
+        delay
+    }
+}
