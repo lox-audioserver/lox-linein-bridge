@@ -39,6 +39,8 @@ jobs:
             allow_failure: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Install ALSA dev libs
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
@@ -46,10 +48,9 @@ jobs:
         id: resolve_tag
         run: |
           python - <<'PY'
-          import json
           import os
           import sys
-          import urllib.request
+          import subprocess
           
           event_name = os.environ.get("GITHUB_EVENT_NAME")
           input_tag = os.environ.get("INPUT_TAG", "").strip()
@@ -59,15 +60,13 @@ jobs:
           elif input_tag:
               tag = input_tag
           else:
-              repo = os.environ["GITHUB_REPOSITORY"]
-              url = f"https://api.github.com/repos/{repo}/releases/latest"
-              req = urllib.request.Request(url)
-              token = os.environ.get("GITHUB_TOKEN", "")
-              if token:
-                  req.add_header("Authorization", f"Bearer {token}")
-              with urllib.request.urlopen(req) as resp:
-                  data = json.load(resp)
-              tag = data.get("tag_name", "")
+              result = subprocess.run(
+                  ["git", "tag", "--sort=-creatordate"],
+                  capture_output=True,
+                  text=True,
+                  check=True,
+              )
+              tag = next((line for line in result.stdout.splitlines() if line.strip()), "")
           
           if not tag:
               print("Could not resolve release tag", file=sys.stderr)
