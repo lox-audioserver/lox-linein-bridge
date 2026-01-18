@@ -1,3 +1,10 @@
+# [1.5.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.4.0...v1.5.0) (2026-01-18)
+
+
+### Features
+
+* apply VAD updates live without restarting ingest ([30ee908](https://github.com/lox-audioserver/lox-linein-bridge/commit/30ee9089ddb83b3f7706a9627da0390af4d93d51))
+
 # [1.4.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.3.0...v1.4.0) (2026-01-18)
 
 
