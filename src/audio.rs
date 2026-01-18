@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, StreamConfig};
+use cpal::{HostId, SampleFormat, StreamConfig};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -20,7 +20,7 @@ pub struct CaptureSession {
 }
 
 pub fn list_input_devices() -> Result<Vec<DeviceInfo>> {
-    let host = cpal::default_host();
+    let host = select_host()?;
     let devices = host.input_devices().context("enumerate input devices")?;
     let mut results = Vec::new();
     for device in devices {
@@ -33,7 +33,7 @@ pub fn list_input_devices() -> Result<Vec<DeviceInfo>> {
 }
 
 pub fn start_capture(device_name: &str) -> Result<CaptureSession> {
-    let host = cpal::default_host();
+    let host = select_host()?;
     let device = host
         .input_devices()
         .context("enumerate input devices")?
@@ -109,6 +109,14 @@ pub fn start_capture(device_name: &str) -> Result<CaptureSession> {
         error_receiver: err_rx,
         stream,
     })
+}
+
+fn select_host() -> Result<cpal::Host> {
+    let hosts = cpal::available_hosts();
+    if hosts.contains(&HostId::Alsa) {
+        return cpal::host_from_id(HostId::Alsa).context("select ALSA host");
+    }
+    Ok(cpal::default_host())
 }
 
 fn handle_samples_f32(
