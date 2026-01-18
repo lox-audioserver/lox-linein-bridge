@@ -1,3 +1,11 @@
+# [1.4.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.3.0...v1.4.0) (2026-01-18)
+
+
+### Features
+
+* add mDNS discovery, bridge registration, server-driven config, and install flow updates ([a00a736](https://github.com/lox-audioserver/lox-linein-bridge/commit/a00a7369a1cd7e8f4a7da330c8317a9f8d9cc7e2))
+* switch bridge to mDNS discovery with server registration and config-driven streaming ([d483437](https://github.com/lox-audioserver/lox-linein-bridge/commit/d4834370f430dfd02f582112bbc0d3f676006971))
+
 # [1.3.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.2.0...v1.3.0) (2026-01-18)
 
 
