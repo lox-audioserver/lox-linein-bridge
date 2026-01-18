@@ -110,8 +110,7 @@ async fn run() -> Result<()> {
                     status: status.clone(),
                 };
 
-                if let Err(err) = stream::stream_audio(params).await
-                {
+                if let Err(err) = stream::stream_audio(params).await {
                     status.set_state("ERROR");
                     status.set_last_error(Some(err.to_string()));
                     warn!("streaming stopped: {}", err);
