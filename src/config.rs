@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const CONFIG_DIR_SYSTEM: &str = "/etc/lox-linein-bridge";
 const CONFIG_DIR_FALLBACK: &str = ".config/lox-linein-bridge";
@@ -82,7 +82,11 @@ fn backup_invalid_config(path: &Path, err: &anyhow::Error) -> Result<()> {
         .as_secs();
     let backup = path.with_extension(format!("invalid.{}", timestamp));
     fs::rename(path, &backup)
-        .or_else(|_| fs::copy(path, &backup).map(|_| ()).and_then(|_| fs::remove_file(path)))
+        .or_else(|_| {
+            fs::copy(path, &backup)
+                .map(|_| ())
+                .and_then(|_| fs::remove_file(path))
+        })
         .with_context(|| format!("backup invalid config {}: {}", path.display(), err))?;
     Ok(())
 }
