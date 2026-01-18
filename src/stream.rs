@@ -227,10 +227,6 @@ impl VadGate {
         self.last_active = Some(now);
     }
 
-    fn touch(&mut self, now: Instant) {
-        self.last_active = Some(now);
-    }
-
     fn set_inactive(&mut self) {
         self.active = false;
     }
