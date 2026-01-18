@@ -1,4 +1,4 @@
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", alsa_silence))]
 mod inner {
     extern "C" {
         fn lox_alsa_silence_init();
@@ -11,7 +11,7 @@ mod inner {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(not(target_os = "linux"), not(alsa_silence)))]
 mod inner {
     pub fn init() {}
 }
