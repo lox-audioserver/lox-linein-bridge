@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(alsa_silence)");
     #[cfg(target_os = "linux")]
     {
         println!("cargo:rerun-if-changed=src/alsa_silence.c");
