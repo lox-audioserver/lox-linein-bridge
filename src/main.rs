@@ -99,17 +99,18 @@ async fn run() -> Result<()> {
                 let vad_threshold_db = ingest.vad_threshold_db.unwrap_or(-45.0);
                 let vad_hold_ms = ingest.vad_hold_ms.unwrap_or(1500);
 
-                if let Err(err) = stream::stream_audio(
-                    &config.linein_id,
-                    &ingest.ingest_tcp_host,
-                    ingest.ingest_tcp_port,
-                    receiver,
-                    error_receiver,
-                    vad_threshold_db,
-                    std::time::Duration::from_millis(vad_hold_ms),
-                    status.clone(),
-                )
-                .await
+                let params = stream::StreamParams {
+                    linein_id: &config.linein_id,
+                    ingest_host: &ingest.ingest_tcp_host,
+                    ingest_port: ingest.ingest_tcp_port,
+                    rx: receiver,
+                    err_rx: error_receiver,
+                    threshold_db: vad_threshold_db,
+                    hold_duration: std::time::Duration::from_millis(vad_hold_ms),
+                    status: status.clone(),
+                };
+
+                if let Err(err) = stream::stream_audio(params).await
                 {
                     status.set_state("ERROR");
                     status.set_last_error(Some(err.to_string()));

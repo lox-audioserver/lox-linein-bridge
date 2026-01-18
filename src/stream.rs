@@ -85,33 +85,35 @@ impl StatusHandle {
     }
 }
 
-pub async fn stream_audio(
-    linein_id: &str,
-    ingest_host: &str,
-    ingest_port: u16,
-    mut rx: mpsc::Receiver<Vec<u8>>,
-    mut err_rx: mpsc::Receiver<String>,
-    threshold_db: f32,
-    hold_duration: Duration,
-    status: StatusHandle,
-) -> Result<()> {
+pub struct StreamParams<'a> {
+    pub linein_id: &'a str,
+    pub ingest_host: &'a str,
+    pub ingest_port: u16,
+    pub rx: mpsc::Receiver<Vec<u8>>,
+    pub err_rx: mpsc::Receiver<String>,
+    pub threshold_db: f32,
+    pub hold_duration: Duration,
+    pub status: StatusHandle,
+}
+
+pub async fn stream_audio(mut params: StreamParams<'_>) -> Result<()> {
     let mut backoff = Backoff::new();
-    let addr = format!("{}:{}", ingest_host, ingest_port);
+    let addr = format!("{}:{}", params.ingest_host, params.ingest_port);
     let mut gate = VadGate::new();
 
     let mut stream: Option<TcpStream> = None;
     loop {
         if stream.is_none() {
-            status.set_state("RECONNECTING");
-            match connect(&addr, linein_id).await {
+            params.status.set_state("RECONNECTING");
+            match connect(&addr, params.linein_id).await {
                 Ok(connected) => {
                     stream = Some(connected);
-                    status.set_state("STREAMING");
-                    status.set_last_error(None);
+                    params.status.set_state("STREAMING");
+                    params.status.set_last_error(None);
                     backoff.reset();
                 }
                 Err(err) => {
-                    status.set_last_error(Some(err.to_string()));
+                    params.status.set_last_error(Some(err.to_string()));
                     tokio::time::sleep(backoff.next_delay()).await;
                     continue;
                 }
@@ -119,15 +121,15 @@ pub async fn stream_audio(
         }
 
         tokio::select! {
-            maybe_chunk = rx.recv() => {
+            maybe_chunk = params.rx.recv() => {
                 match maybe_chunk {
                     Some(chunk) => {
                         if let Some(rms_db) = rms_db_from_pcm_i16_le(&chunk) {
                             let now = Instant::now();
                             let was_active = gate.active;
-                            if rms_db >= threshold_db {
+                            if rms_db >= params.threshold_db {
                                 gate.set_active(now);
-                            } else if gate.should_keep_active(now, hold_duration) {
+                            } else if gate.should_keep_active(now, params.hold_duration) {
                                 gate.touch(now);
                             } else {
                                 gate.set_inactive();
@@ -141,17 +143,17 @@ pub async fn stream_audio(
                         }
 
                         if !gate.active {
-                            status.set_state("IDLE");
+                            params.status.set_state("IDLE");
                             continue;
                         }
 
                         if let Some(writer) = stream.as_mut() {
                             if let Err(err) = writer.write_all(&chunk).await {
-                                status.set_last_error(Some(err.to_string()));
+                                params.status.set_last_error(Some(err.to_string()));
                                 stream = None;
                             } else {
-                                status.set_state("STREAMING");
-                                status.record_bytes(chunk.len());
+                                params.status.set_state("STREAMING");
+                                params.status.record_bytes(chunk.len());
                             }
                         }
                     }
@@ -160,12 +162,12 @@ pub async fn stream_audio(
                     }
                 }
             }
-            maybe_err = err_rx.recv() => {
+            maybe_err = params.err_rx.recv() => {
                 let message = match maybe_err {
                     Some(message) => message,
                     None => "audio capture error channel closed".to_string(),
                 };
-                status.set_last_error(Some(message.clone()));
+                params.status.set_last_error(Some(message.clone()));
                 return Err(anyhow::anyhow!(message));
             }
         }
