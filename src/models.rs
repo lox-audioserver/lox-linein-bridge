@@ -1,24 +1,43 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
-pub struct LineIn {
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
+pub struct CaptureDeviceInfo {
     pub id: String,
     pub name: String,
+    pub channels: u16,
+    pub sample_rates: Vec<u32>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct IngestTarget {
-    pub ingest_tcp_host: String,
-    pub ingest_tcp_port: u16,
+#[derive(Debug, Serialize)]
+pub struct BridgeRegisterRequest {
+    pub bridge_id: String,
+    pub hostname: String,
+    pub version: String,
+    pub ip: String,
+    pub mac: String,
+    pub capture_devices: Vec<CaptureDeviceInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BridgeStatusRequest {
+    pub state: String,
+    pub device: Option<String>,
+    pub rate: Option<u32>,
+    pub channels: Option<u16>,
+    pub format: Option<String>,
+    pub rms_db: Option<f32>,
+    pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_devices: Option<Vec<CaptureDeviceInfo>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct BridgeConfigResponse {
+    pub assigned_input_id: Option<String>,
+    pub ingest_ws_url: Option<String>,
+    pub ingest_tcp_host: Option<String>,
+    pub ingest_tcp_port: Option<u16>,
+    pub capture_device: Option<String>,
     pub vad_threshold_db: Option<f32>,
     pub vad_hold_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct StatusSnapshot {
-    pub ts: String,
-    pub state: String,
-    pub device: String,
-    pub ingest: String,
-    pub last_error: Option<String>,
 }

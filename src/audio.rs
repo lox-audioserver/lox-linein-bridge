@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{HostId, SampleFormat, StreamConfig};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -8,18 +9,16 @@ use tracing::warn;
 const TARGET_RATE: u32 = 48_000;
 const TARGET_CHANNELS: u16 = 2;
 
-#[derive(Debug, Clone)]
-pub struct DeviceInfo {
-    pub name: String,
-}
-
 pub struct CaptureSession {
     pub receiver: mpsc::Receiver<Vec<u8>>,
     pub error_receiver: mpsc::Receiver<String>,
     pub stream: cpal::Stream,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub format: SampleFormat,
 }
 
-pub fn list_input_devices() -> Result<Vec<DeviceInfo>> {
+pub fn list_input_device_details() -> Result<Vec<crate::models::CaptureDeviceInfo>> {
     let host = select_host()?;
     let devices = host.input_devices().context("enumerate input devices")?;
     let mut results = Vec::new();
@@ -27,7 +26,23 @@ pub fn list_input_devices() -> Result<Vec<DeviceInfo>> {
         let name = device
             .name()
             .unwrap_or_else(|_| "Unknown Device".to_string());
-        results.push(DeviceInfo { name });
+        let mut channels = 0u16;
+        let mut rates = BTreeSet::new();
+        if let Ok(configs) = device.supported_input_configs() {
+            for config in configs {
+                channels = channels.max(config.channels());
+                let min = config.min_sample_rate().0;
+                let max = config.max_sample_rate().0;
+                rates.insert(min);
+                rates.insert(max);
+            }
+        }
+        results.push(crate::models::CaptureDeviceInfo {
+            id: name.clone(),
+            name,
+            channels,
+            sample_rates: rates.into_iter().collect(),
+        });
     }
     Ok(results)
 }
@@ -108,6 +123,9 @@ pub fn start_capture(device_name: &str) -> Result<CaptureSession> {
         receiver: rx,
         error_receiver: err_rx,
         stream,
+        sample_rate: config.sample_rate.0,
+        channels: config.channels,
+        format: sample_format,
     })
 }
 

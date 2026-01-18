@@ -1,79 +1,69 @@
-use crate::models::{IngestTarget, LineIn, StatusSnapshot};
+use crate::models::{BridgeConfigResponse, BridgeRegisterRequest, BridgeStatusRequest};
 use anyhow::{Context, Result};
 use reqwest::Client;
-use url::Url;
 
 #[derive(Clone)]
 pub struct ServerApi {
     base_url: String,
+    register_path: String,
+    status_path: String,
     client: Client,
 }
 
 impl ServerApi {
-    pub fn new(server_url: &str) -> Result<Self> {
-        let url = Url::parse(server_url).context("invalid server URL")?;
-        let mut base_url = url.to_string();
-        while base_url.ends_with('/') {
-            base_url.pop();
-        }
-
+    pub fn new(base_url: &str, register_path: &str, status_path: &str) -> Result<Self> {
         Ok(Self {
-            base_url,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            register_path: register_path.to_string(),
+            status_path: status_path.to_string(),
             client: Client::new(),
         })
     }
 
-    pub fn base_host(&self) -> Result<String> {
-        let url = Url::parse(&self.base_url).context("invalid server URL")?;
-        url.host_str()
-            .map(|s| s.to_string())
-            .context("server URL missing host")
-    }
-
-    pub async fn discover_lineins(&self) -> Result<Vec<LineIn>> {
-        let url = format!("{}/api/linein", self.base_url);
+    pub async fn register_bridge(
+        &self,
+        request: &BridgeRegisterRequest,
+    ) -> Result<BridgeConfigResponse> {
+        let url = format!("{}{}", self.base_url, self.register_path);
         let response = self
             .client
-            .get(url)
-            .send()
-            .await
-            .context("request line-ins")?
-            .error_for_status()
-            .context("line-ins response status")?;
-        let lineins = response
-            .json::<Vec<LineIn>>()
-            .await
-            .context("parse line-ins")?;
-        Ok(lineins)
-    }
-
-    pub async fn get_ingest(&self, linein_id: &str) -> Result<IngestTarget> {
-        let url = format!("{}/api/linein/{}/ingest", self.base_url, linein_id);
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .context("request ingest target")?
-            .error_for_status()
-            .context("ingest response status")?;
-        let ingest = response
-            .json::<IngestTarget>()
-            .await
-            .context("parse ingest")?;
-        Ok(ingest)
-    }
-
-    pub async fn post_status(&self, linein_id: &str, snapshot: &StatusSnapshot) -> Result<()> {
-        let url = format!("{}/api/linein/{}/bridge-status", self.base_url, linein_id);
-        self.client
             .post(url)
-            .json(snapshot)
+            .json(request)
+            .send()
+            .await
+            .context("register bridge")?
+            .error_for_status()
+            .context("register response status")?;
+        let config = response
+            .json::<BridgeConfigResponse>()
+            .await
+            .context("parse register response")?;
+        Ok(config)
+    }
+
+    pub async fn post_status(
+        &self,
+        bridge_id: &str,
+        status: &BridgeStatusRequest,
+    ) -> Result<BridgeConfigResponse> {
+        let url = format!(
+            "{}{}",
+            self.base_url,
+            self.status_path.replace("{bridge_id}", bridge_id)
+        );
+        let response = self
+            .client
+            .post(url)
+            .json(status)
             .send()
             .await
             .context("post status")?
             .error_for_status()
             .context("status response status")?;
-        Ok(())
+        let config = response
+            .json::<BridgeConfigResponse>()
+            .await
+            .context("parse status response")?;
+        Ok(config)
     }
 }

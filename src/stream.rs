@@ -1,11 +1,16 @@
-use crate::models::StatusSnapshot;
+use crate::models::BridgeStatusRequest;
 use anyhow::{Context, Result};
+use futures_util::SinkExt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 use tracing::info;
+
+type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 
 #[derive(Clone)]
 pub struct StatusHandle {
@@ -17,6 +22,10 @@ struct StatusState {
     device: String,
     ingest: String,
     last_error: Option<String>,
+    rate: Option<u32>,
+    channels: Option<u16>,
+    format: Option<String>,
+    rms_db: Option<f32>,
     bytes_sent_total: u64,
     last_chunk_ts: Option<String>,
 }
@@ -25,10 +34,14 @@ impl StatusHandle {
     pub fn new(device: &str, ingest: &str) -> Self {
         Self {
             inner: Arc::new(Mutex::new(StatusState {
-                state: "RECONNECTING".to_string(),
+                state: "IDLE".to_string(),
                 device: device.to_string(),
                 ingest: ingest.to_string(),
                 last_error: None,
+                rate: None,
+                channels: None,
+                format: None,
+                rms_db: None,
                 bytes_sent_total: 0,
                 last_chunk_ts: None,
             })),
@@ -47,17 +60,23 @@ impl StatusHandle {
         }
     }
 
-    pub fn snapshot(&self) -> StatusSnapshot {
-        let inner = match self.inner.lock() {
-            Ok(inner) => inner,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        StatusSnapshot {
-            ts: crate::timestamp::now_rfc3339(),
-            state: inner.state.clone(),
-            device: inner.device.clone(),
-            ingest: inner.ingest.clone(),
-            last_error: inner.last_error.clone(),
+    pub fn set_device(&self, device: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.device = device.to_string();
+        }
+    }
+
+    pub fn set_capture_info(&self, rate: u32, channels: u16, format: String) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.rate = Some(rate);
+            inner.channels = Some(channels);
+            inner.format = Some(format);
+        }
+    }
+
+    pub fn set_rms_db(&self, rms_db: Option<f32>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.rms_db = rms_db;
         }
     }
 
@@ -83,12 +102,48 @@ impl StatusHandle {
             last_chunk_ts: inner.last_chunk_ts.clone(),
         }
     }
+
+    pub fn bridge_status(&self) -> BridgeStatusRequest {
+        let inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        BridgeStatusRequest {
+            state: inner.state.clone(),
+            device: if inner.device.is_empty() {
+                None
+            } else {
+                Some(inner.device.clone())
+            },
+            rate: inner.rate,
+            channels: inner.channels,
+            format: inner.format.clone(),
+            rms_db: inner.rms_db,
+            last_error: inner.last_error.clone(),
+            capture_devices: None,
+        }
+    }
+
+    pub fn set_ingest(&self, ingest: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.ingest = ingest.to_string();
+        }
+    }
 }
 
-pub struct StreamParams<'a> {
-    pub linein_id: &'a str,
-    pub ingest_host: &'a str,
-    pub ingest_port: u16,
+pub enum IngestTarget {
+    Tcp {
+        host: String,
+        port: u16,
+        header: String,
+    },
+    Ws {
+        url: String,
+    },
+}
+
+pub struct StreamParams {
+    pub ingest: IngestTarget,
     pub rx: mpsc::Receiver<Vec<u8>>,
     pub err_rx: mpsc::Receiver<String>,
     pub threshold_db: f32,
@@ -96,16 +151,27 @@ pub struct StreamParams<'a> {
     pub status: StatusHandle,
 }
 
-pub async fn stream_audio(mut params: StreamParams<'_>) -> Result<()> {
+pub async fn stream_audio(mut params: StreamParams) -> Result<()> {
+    match &params.ingest {
+        IngestTarget::Tcp { .. } => stream_audio_tcp(&mut params).await,
+        IngestTarget::Ws { .. } => stream_audio_ws(&mut params).await,
+    }
+}
+
+async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
     let mut backoff = Backoff::new();
-    let addr = format!("{}:{}", params.ingest_host, params.ingest_port);
+    let (host, port, header) = match &params.ingest {
+        IngestTarget::Tcp { host, port, header } => (host.clone(), *port, header.clone()),
+        IngestTarget::Ws { .. } => anyhow::bail!("invalid tcp ingest"),
+    };
+    let addr = format!("{}:{}", host, port);
     let mut gate = VadGate::new();
 
     let mut stream: Option<TcpStream> = None;
     loop {
         if stream.is_none() {
             params.status.set_state("RECONNECTING");
-            match connect(&addr, params.linein_id).await {
+            match connect_tcp(&addr, &header).await {
                 Ok(connected) => {
                     stream = Some(connected);
                     params.status.set_state("STREAMING");
@@ -124,13 +190,14 @@ pub async fn stream_audio(mut params: StreamParams<'_>) -> Result<()> {
             maybe_chunk = params.rx.recv() => {
                 match maybe_chunk {
                     Some(chunk) => {
-                        if let Some(rms_db) = rms_db_from_pcm_i16_le(&chunk) {
+                        let rms_db = rms_db_from_pcm_i16_le(&chunk);
+                        params.status.set_rms_db(rms_db);
+                        if let Some(rms_db) = rms_db {
                             let now = Instant::now();
                             let was_active = gate.active;
                             if rms_db >= params.threshold_db {
                                 gate.set_active(now);
                             } else if gate.should_keep_active(now, params.hold_duration) {
-                                // Keep active during hold window without extending it.
                             } else {
                                 gate.set_inactive();
                             }
@@ -174,16 +241,106 @@ pub async fn stream_audio(mut params: StreamParams<'_>) -> Result<()> {
     }
 }
 
-async fn connect(addr: &str, linein_id: &str) -> Result<TcpStream> {
+async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
+    let mut backoff = Backoff::new();
+    let url = match &params.ingest {
+        IngestTarget::Ws { url } => url.clone(),
+        IngestTarget::Tcp { .. } => anyhow::bail!("invalid ws ingest"),
+    };
+    let mut gate = VadGate::new();
+
+    let mut stream = None;
+    loop {
+        if stream.is_none() {
+            params.status.set_state("RECONNECTING");
+            match connect_ws(&url).await {
+                Ok(connected) => {
+                    stream = Some(connected);
+                    params.status.set_state("STREAMING");
+                    params.status.set_last_error(None);
+                    backoff.reset();
+                }
+                Err(err) => {
+                    params.status.set_last_error(Some(err.to_string()));
+                    tokio::time::sleep(backoff.next_delay()).await;
+                    continue;
+                }
+            }
+        }
+
+        tokio::select! {
+            maybe_chunk = params.rx.recv() => {
+                match maybe_chunk {
+                    Some(chunk) => {
+                        let rms_db = rms_db_from_pcm_i16_le(&chunk);
+                        params.status.set_rms_db(rms_db);
+                        if let Some(rms_db) = rms_db {
+                            let now = Instant::now();
+                            let was_active = gate.active;
+                            if rms_db >= params.threshold_db {
+                                gate.set_active(now);
+                            } else if gate.should_keep_active(now, params.hold_duration) {
+                            } else {
+                                gate.set_inactive();
+                            }
+
+                            if gate.active && !was_active {
+                                info!("audio detected, streaming (rms_db={:.1})", rms_db);
+                            } else if !gate.active && was_active {
+                                info!("silence detected, pausing stream (rms_db={:.1})", rms_db);
+                            }
+                        }
+
+                        if !gate.active {
+                            params.status.set_state("IDLE");
+                            continue;
+                        }
+
+                        if let Some(writer) = stream.as_mut() {
+                            let chunk_len = chunk.len();
+                            if let Err(err) = writer.send(Message::Binary(chunk)).await {
+                                params.status.set_last_error(Some(err.to_string()));
+                                stream = None;
+                            } else {
+                                params.status.set_state("STREAMING");
+                                params.status.record_bytes(chunk_len);
+                            }
+                        }
+                    }
+                    None => {
+                        return Err(anyhow::anyhow!("audio capture channel closed"));
+                    }
+                }
+            }
+            maybe_err = params.err_rx.recv() => {
+                let message = match maybe_err {
+                    Some(message) => message,
+                    None => "audio capture error channel closed".to_string(),
+                };
+                params.status.set_last_error(Some(message.clone()));
+                return Err(anyhow::anyhow!(message));
+            }
+        }
+    }
+}
+
+async fn connect_tcp(addr: &str, header: &str) -> Result<TcpStream> {
     let mut stream = TcpStream::connect(addr)
         .await
         .with_context(|| format!("connect to {}", addr))?;
     stream.set_nodelay(true).context("set TCP nodelay")?;
-    let header = format!("{}\n", linein_id);
+    let header_line = format!("{}\n", header);
     stream
-        .write_all(header.as_bytes())
+        .write_all(header_line.as_bytes())
         .await
-        .context("send line-in id")?;
+        .context("send input id")?;
+    Ok(stream)
+}
+
+async fn connect_ws(url: &str) -> Result<WsStream> {
+    let (stream, _) = connect_async(url)
+        .await
+        .with_context(|| format!("connect ws {}", url))?;
     Ok(stream)
 }
 

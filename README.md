@@ -1,6 +1,6 @@
 # lox-linein-bridge
 
-`lox-linein-bridge` is a tiny Linux CLI that captures ALSA audio and streams it to a lox-audioserver line-in ingest over plain TCP. It is designed for Raspberry Pi / SBC and keeps configuration fully automatic through the install wizard.
+`lox-linein-bridge` is a tiny Linux CLI that captures ALSA audio and streams it to a lox-audioserver line-in ingest over TCP or WebSocket. It is designed for Raspberry Pi / SBC and keeps configuration fully automatic through server-side discovery and registration.
 
 ## Download
 
@@ -18,26 +18,26 @@ Raspberry Pi mapping:
 
 Download the latest release for your device and place the `lox-linein-bridge` binary in `/usr/local/bin/`.
 
-## Install (wizard)
-
-```bash
-lox-linein-bridge install --server http://<lox-host>:7090
-```
-
-The wizard will:
-- Discover line-ins from the server
-- Let you select a line-in and capture device
-- Write `config.toml`
-- Generate a systemd unit
-- Print the systemctl commands to enable it
-
 ## Run (systemd)
 
 ```bash
 lox-linein-bridge run
 ```
 
-This is only meant for systemd. It loads config, resolves the ingest target, and streams PCM audio.
+This is only meant for systemd. It discovers the server over mDNS, registers the bridge, and streams PCM audio based on server config.
+
+## Install (systemd)
+
+```bash
+sudo lox-linein-bridge install
+```
+
+This writes the systemd unit, reloads systemd, and enables + starts the service.
+
+mDNS discovery looks for `_loxaudio._tcp` and uses TXT fields:
+- `api` (default `/api`)
+- `linein_register` (default `/api/linein/bridges/register`)
+- `linein_status` (default `/api/linein/bridges/{bridge_id}/status`)
 
 ## Voice activity detection (VAD)
 
@@ -60,11 +60,16 @@ Example `GET /api/linein/{id}/ingest` response:
 
 ## Configuration
 
-The wizard writes:
+The bridge writes:
 - `/etc/lox-linein-bridge/config.toml` (preferred)
 - `~/.config/lox-linein-bridge/config.toml` (fallback)
 
 Example: `examples/config.toml`
+
+Config fields:
+- `bridge_id` (auto-generated if missing)
+- `preferred_server_name` (optional mDNS TXT match)
+- `preferred_server_mac` (optional mDNS TXT match)
 
 ## Systemd unit
 
@@ -82,10 +87,9 @@ cargo build --release
 sudo cp target/release/lox-linein-bridge /usr/local/bin/
 ```
 
-Then run the install wizard and enable the service:
+Then enable the service:
 
 ```bash
-lox-linein-bridge install --server http://<lox-host>:7090
 sudo systemctl daemon-reload
 sudo systemctl enable --now lox-linein-bridge
 ```

@@ -9,9 +9,11 @@ const CONFIG_FILE: &str = "config.toml";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
-    pub server_url: String,
-    pub linein_id: String,
-    pub capture_device: String,
+    pub bridge_id: String,
+    #[serde(default)]
+    pub preferred_server_name: Option<String>,
+    #[serde(default)]
+    pub preferred_server_mac: Option<String>,
 }
 
 pub fn preferred_config_path() -> PathBuf {
@@ -37,7 +39,7 @@ pub fn write_config(config: &Config) -> Result<PathBuf> {
     Ok(fallback)
 }
 
-pub fn load_config() -> Result<(Config, PathBuf)> {
+pub fn load_or_create_config() -> Result<(Config, PathBuf)> {
     let preferred = preferred_config_path();
     if preferred.exists() {
         let data = fs::read_to_string(&preferred).context("read config")?;
@@ -52,7 +54,13 @@ pub fn load_config() -> Result<(Config, PathBuf)> {
         return Ok((config, fallback));
     }
 
-    anyhow::bail!("no config found; run `lox-linein-bridge install --server <url>`");
+    let config = Config {
+        bridge_id: uuid::Uuid::new_v4().to_string(),
+        preferred_server_name: None,
+        preferred_server_mac: None,
+    };
+    let path = write_config(&config)?;
+    Ok((config, path))
 }
 
 fn try_write(path: &Path, contents: &str) -> Result<()> {
