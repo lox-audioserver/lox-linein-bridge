@@ -5,11 +5,12 @@ pre-build = ["apt-get update && apt-get install -y libasound2-dev pkg-config"]
 pre-build = [
   "dpkg --add-architecture arm64",
   "apt-get update",
-  "apt-get install -y libasound2-dev:arm64 pkg-config"
+  "apt-get install -y libasound2-dev:arm64 libc6-dev:arm64 pkg-config"
 ]
 [target.aarch64-unknown-linux-gnu.env]
 passthrough = [
   "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig",
+  "PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu",
   "PKG_CONFIG_ALLOW_CROSS=1"
 ]
 
@@ -17,11 +18,12 @@ passthrough = [
 pre-build = [
   "dpkg --add-architecture armhf",
   "apt-get update",
-  "apt-get install -y libasound2-dev:armhf pkg-config"
+  "apt-get install -y libasound2-dev:armhf libc6-dev:armhf pkg-config"
 ]
 [target.armv7-unknown-linux-gnueabihf.env]
 passthrough = [
   "PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig",
+  "PKG_CONFIG_SYSROOT_DIR=/usr/arm-linux-gnueabihf",
   "PKG_CONFIG_ALLOW_CROSS=1"
 ]
 
@@ -29,10 +31,11 @@ passthrough = [
 pre-build = [
   "dpkg --add-architecture armhf",
   "apt-get update",
-  "apt-get install -y libasound2-dev:armhf pkg-config"
+  "apt-get install -y libasound2-dev:armhf libc6-dev:armhf pkg-config"
 ]
 [target.arm-unknown-linux-gnueabihf.env]
 passthrough = [
   "PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig",
+  "PKG_CONFIG_SYSROOT_DIR=/usr/arm-linux-gnueabihf",
   "PKG_CONFIG_ALLOW_CROSS=1"
 ]
