@@ -20,3 +20,11 @@ url = "2.5"
 
 [build-dependencies]
 cc = "1.2"
+pkg-config = "0.3"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = "z"
+strip = "symbols"

@@ -717,6 +717,7 @@ dependencies = [
  "cc",
  "cpal",
  "dialoguer",
+ "pkg-config",
  "reqwest",
  "serde",
  "serde_json",
