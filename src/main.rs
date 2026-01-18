@@ -92,6 +92,10 @@ async fn run() -> Result<()> {
 
     let runtime = RuntimeConfig::from_response(initial_config);
     let (config_tx, mut config_rx) = tokio::sync::watch::channel(runtime.clone());
+    let (vad_tx, vad_rx) = tokio::sync::watch::channel((
+        runtime.vad_threshold_db,
+        std::time::Duration::from_millis(runtime.vad_hold_ms),
+    ));
 
     let status = stream::StatusHandle::new("", "");
     health::spawn(status.clone());
@@ -120,6 +124,10 @@ async fn run() -> Result<()> {
                             updated.vad_threshold_db,
                             updated.vad_hold_ms
                         );
+                        let _ = vad_tx.send((
+                            updated.vad_threshold_db,
+                            std::time::Duration::from_millis(updated.vad_hold_ms),
+                        ));
                         let _ = config_tx.send(updated);
                     }
                 }
@@ -175,9 +183,11 @@ async fn run() -> Result<()> {
                     err_rx: error_receiver,
                     threshold_db: current.vad_threshold_db,
                     hold_duration: std::time::Duration::from_millis(current.vad_hold_ms),
+                    vad_updates: Some(vad_rx.clone()),
                     status: status.clone(),
                 };
 
+                let current_key = current.stream_key();
                 let mut stream_task =
                     tokio::spawn(async move { stream::stream_audio(params).await });
                 tokio::select! {
@@ -192,7 +202,10 @@ async fn run() -> Result<()> {
                         }
                     }
                     _ = config_rx.changed() => {
-                        stream_task.abort();
+                        let next = config_rx.borrow().clone();
+                        if next.stream_key() != current_key {
+                            stream_task.abort();
+                        }
                     }
                 }
             }
@@ -265,12 +278,16 @@ impl RuntimeConfig {
             changed = true;
         }
         if let Some(vad) = response.vad_threshold_db {
-            self.vad_threshold_db = vad;
-            changed = true;
+            if (vad - self.vad_threshold_db).abs() > f32::EPSILON {
+                self.vad_threshold_db = vad;
+                changed = true;
+            }
         }
         if let Some(hold) = response.vad_hold_ms {
-            self.vad_hold_ms = hold;
-            changed = true;
+            if hold != self.vad_hold_ms {
+                self.vad_hold_ms = hold;
+                changed = true;
+            }
         }
         if changed {
             Some(self.clone())
@@ -305,6 +322,25 @@ impl RuntimeConfig {
             _ => "unassigned".to_string(),
         }
     }
+
+    fn stream_key(&self) -> StreamKey {
+        StreamKey {
+            assigned_input_id: self.assigned_input_id.clone(),
+            ingest_ws_url: self.ingest_ws_url.clone(),
+            ingest_tcp_host: self.ingest_tcp_host.clone(),
+            ingest_tcp_port: self.ingest_tcp_port,
+            capture_device: self.capture_device.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StreamKey {
+    assigned_input_id: Option<String>,
+    ingest_ws_url: Option<String>,
+    ingest_tcp_host: Option<String>,
+    ingest_tcp_port: Option<u16>,
+    capture_device: Option<String>,
 }
 
 fn local_identity() -> Result<(String, String)> {

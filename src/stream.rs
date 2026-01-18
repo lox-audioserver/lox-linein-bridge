@@ -148,6 +148,7 @@ pub struct StreamParams {
     pub err_rx: mpsc::Receiver<String>,
     pub threshold_db: f32,
     pub hold_duration: Duration,
+    pub vad_updates: Option<tokio::sync::watch::Receiver<(f32, Duration)>>,
     pub status: StatusHandle,
 }
 
@@ -166,6 +167,8 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
     };
     let addr = format!("{}:{}", host, port);
     let mut gate = VadGate::new();
+    let mut threshold_db = params.threshold_db;
+    let mut hold_duration = params.hold_duration;
 
     let mut stream: Option<TcpStream> = None;
     loop {
@@ -195,9 +198,9 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
                         if let Some(rms_db) = rms_db {
                             let now = Instant::now();
                             let was_active = gate.active;
-                            if rms_db >= params.threshold_db {
+                            if rms_db >= threshold_db {
                                 gate.set_active(now);
-                            } else if gate.should_keep_active(now, params.hold_duration) {
+                            } else if gate.should_keep_active(now, hold_duration) {
                             } else {
                                 gate.set_inactive();
                             }
@@ -237,6 +240,18 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
                 params.status.set_last_error(Some(message.clone()));
                 return Err(anyhow::anyhow!(message));
             }
+            _changed = async {
+                match params.vad_updates.as_mut() {
+                    Some(rx) => rx.changed().await.ok(),
+                    None => None,
+                }
+            }, if params.vad_updates.is_some() => {
+                if let Some(rx) = params.vad_updates.as_ref() {
+                    let (next_threshold, next_hold) = *rx.borrow();
+                    threshold_db = next_threshold;
+                    hold_duration = next_hold;
+                }
+            }
         }
     }
 }
@@ -248,6 +263,8 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
         IngestTarget::Tcp { .. } => anyhow::bail!("invalid ws ingest"),
     };
     let mut gate = VadGate::new();
+    let mut threshold_db = params.threshold_db;
+    let mut hold_duration = params.hold_duration;
 
     let mut stream = None;
     loop {
@@ -277,9 +294,9 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
                         if let Some(rms_db) = rms_db {
                             let now = Instant::now();
                             let was_active = gate.active;
-                            if rms_db >= params.threshold_db {
+                            if rms_db >= threshold_db {
                                 gate.set_active(now);
-                            } else if gate.should_keep_active(now, params.hold_duration) {
+                            } else if gate.should_keep_active(now, hold_duration) {
                             } else {
                                 gate.set_inactive();
                             }
@@ -319,6 +336,18 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
                 };
                 params.status.set_last_error(Some(message.clone()));
                 return Err(anyhow::anyhow!(message));
+            }
+            _changed = async {
+                match params.vad_updates.as_mut() {
+                    Some(rx) => rx.changed().await.ok(),
+                    None => None,
+                }
+            }, if params.vad_updates.is_some() => {
+                if let Some(rx) = params.vad_updates.as_ref() {
+                    let (next_threshold, next_hold) = *rx.borrow();
+                    threshold_db = next_threshold;
+                    hold_duration = next_hold;
+                }
             }
         }
     }
