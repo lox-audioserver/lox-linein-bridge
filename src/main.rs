@@ -1,5 +1,5 @@
-mod audio;
 mod alsa_silence;
+mod audio;
 mod config;
 mod health;
 mod install;
