@@ -186,6 +186,8 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
     let mut threshold_db = params.threshold_db;
     let mut hold_duration = params.hold_duration;
     let mut idle_since: Option<Instant> = None;
+    let mut last_rate_log = Instant::now();
+    let mut bytes_since_log: u64 = 0;
 
     let mut stream: Option<TcpStream> = None;
     loop {
@@ -249,6 +251,18 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
                             } else {
                                 params.status.set_state("STREAMING");
                                 params.status.record_bytes(chunk.len());
+                                bytes_since_log += chunk.len() as u64;
+                                if last_rate_log.elapsed() >= Duration::from_secs(5) {
+                                    let secs = last_rate_log.elapsed().as_secs_f64();
+                                    let bytes_per_sec = (bytes_since_log as f64 / secs).round();
+                                    let est_rate = bytes_per_sec / 4.0;
+                                    info!(
+                                        "stream throughput: {} B/s (~{:.0} Hz)",
+                                        bytes_per_sec, est_rate
+                                    );
+                                    bytes_since_log = 0;
+                                    last_rate_log = Instant::now();
+                                }
                             }
                         }
                     }
@@ -291,6 +305,8 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
     let mut threshold_db = params.threshold_db;
     let mut hold_duration = params.hold_duration;
     let mut idle_since: Option<Instant> = None;
+    let mut last_rate_log = Instant::now();
+    let mut bytes_since_log: u64 = 0;
 
     let mut stream = None;
     loop {
@@ -355,6 +371,18 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
                             } else {
                                 params.status.set_state("STREAMING");
                                 params.status.record_bytes(chunk_len);
+                                bytes_since_log += chunk_len as u64;
+                                if last_rate_log.elapsed() >= Duration::from_secs(5) {
+                                    let secs = last_rate_log.elapsed().as_secs_f64();
+                                    let bytes_per_sec = (bytes_since_log as f64 / secs).round();
+                                    let est_rate = bytes_per_sec / 4.0;
+                                    info!(
+                                        "stream throughput: {} B/s (~{:.0} Hz)",
+                                        bytes_per_sec, est_rate
+                                    );
+                                    bytes_since_log = 0;
+                                    last_rate_log = Instant::now();
+                                }
                             }
                         }
                     }
