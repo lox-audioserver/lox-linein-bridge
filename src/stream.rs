@@ -11,6 +11,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::info;
 
 type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+const TRACK_GAP_MS: u64 = 2000;
 
 #[derive(Clone)]
 pub struct StatusHandle {
@@ -26,6 +27,7 @@ struct StatusState {
     channels: Option<u16>,
     format: Option<String>,
     rms_db: Option<f32>,
+    track_change: bool,
     bytes_sent_total: u64,
     last_chunk_ts: Option<String>,
 }
@@ -42,6 +44,7 @@ impl StatusHandle {
                 channels: None,
                 format: None,
                 rms_db: None,
+                track_change: false,
                 bytes_sent_total: 0,
                 last_chunk_ts: None,
             })),
@@ -80,6 +83,12 @@ impl StatusHandle {
         }
     }
 
+    pub fn set_track_change(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.track_change = true;
+        }
+    }
+
     pub fn record_bytes(&self, bytes: usize) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.bytes_sent_total = inner.bytes_sent_total.saturating_add(bytes as u64);
@@ -104,9 +113,15 @@ impl StatusHandle {
     }
 
     pub fn bridge_status(&self) -> BridgeStatusRequest {
-        let inner = match self.inner.lock() {
+        let mut inner = match self.inner.lock() {
             Ok(inner) => inner,
             Err(poisoned) => poisoned.into_inner(),
+        };
+        let track_change = if inner.track_change {
+            inner.track_change = false;
+            Some(true)
+        } else {
+            None
         };
         BridgeStatusRequest {
             state: inner.state.clone(),
@@ -120,6 +135,7 @@ impl StatusHandle {
             format: inner.format.clone(),
             rms_db: inner.rms_db,
             last_error: inner.last_error.clone(),
+            track_change,
             capture_devices: None,
         }
     }
@@ -169,6 +185,7 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
     let mut gate = VadGate::new();
     let mut threshold_db = params.threshold_db;
     let mut hold_duration = params.hold_duration;
+    let mut idle_since: Option<Instant> = None;
 
     let mut stream: Option<TcpStream> = None;
     loop {
@@ -206,8 +223,16 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
                             }
 
                             if gate.active && !was_active {
+                                if let Some(idle_start) = idle_since.take() {
+                                    if now.duration_since(idle_start)
+                                        >= Duration::from_millis(TRACK_GAP_MS)
+                                    {
+                                        params.status.set_track_change();
+                                    }
+                                }
                                 info!("audio detected, streaming (rms_db={:.1})", rms_db);
                             } else if !gate.active && was_active {
+                                idle_since = Some(now);
                                 info!("silence detected, pausing stream (rms_db={:.1})", rms_db);
                             }
                         }
@@ -265,6 +290,7 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
     let mut gate = VadGate::new();
     let mut threshold_db = params.threshold_db;
     let mut hold_duration = params.hold_duration;
+    let mut idle_since: Option<Instant> = None;
 
     let mut stream = None;
     loop {
@@ -302,8 +328,16 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
                             }
 
                             if gate.active && !was_active {
+                                if let Some(idle_start) = idle_since.take() {
+                                    if now.duration_since(idle_start)
+                                        >= Duration::from_millis(TRACK_GAP_MS)
+                                    {
+                                        params.status.set_track_change();
+                                    }
+                                }
                                 info!("audio detected, streaming (rms_db={:.1})", rms_db);
                             } else if !gate.active && was_active {
+                                idle_since = Some(now);
                                 info!("silence detected, pausing stream (rms_db={:.1})", rms_db);
                             }
                         }

@@ -28,6 +28,8 @@ pub struct BridgeStatusRequest {
     pub rms_db: Option<f32>,
     pub last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_change: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_devices: Option<Vec<CaptureDeviceInfo>>,
 }
 
@@ -40,4 +42,5 @@ pub struct BridgeConfigResponse {
     pub capture_device: Option<String>,
     pub vad_threshold_db: Option<f32>,
     pub vad_hold_ms: Option<u64>,
+    pub ingest_sample_rate: Option<u32>,
 }

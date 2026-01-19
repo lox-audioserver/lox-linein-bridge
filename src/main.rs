@@ -16,28 +16,24 @@ use tracing::{info, warn};
 #[tokio::main]
 async fn main() -> Result<()> {
     alsa_silence::init();
+    let (command, log_level) = parse_args()?;
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            log_level.unwrap_or_else(|| "off".to_string()),
+        ))
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        print_usage();
-        eprintln!();
-        anyhow::bail!("missing command (see usage above)");
-    }
-
-    match args[1].as_str() {
-        "--help" | "-h" => {
+    match command.as_deref() {
+        Some("--help") | Some("-h") => {
             print_usage();
             Ok(())
         }
-        "--version" | "-V" => {
+        Some("--version") | Some("-V") => {
             println!("lox-linein-bridge {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        "install" => install::run_install().await,
-        "run" => run().await,
+        Some("install") => install::run_install().await,
+        Some("run") | None => run().await,
         _ => {
             print_usage();
             anyhow::bail!("unknown command");
@@ -118,11 +114,12 @@ async fn run() -> Result<()> {
                 Ok(update) => {
                     if let Some(updated) = runtime.update(update) {
                         info!(
-                            "config update: assigned_input_id={:?}, capture_device={:?}, vad_threshold_db={}, vad_hold_ms={}",
+                            "config update: assigned_input_id={:?}, capture_device={:?}, vad_threshold_db={}, vad_hold_ms={}, target_rate={}",
                             updated.assigned_input_id,
                             updated.capture_device,
                             updated.vad_threshold_db,
-                            updated.vad_hold_ms
+                            updated.vad_hold_ms,
+                            updated.target_rate
                         );
                         let _ = vad_tx.send((
                             updated.vad_threshold_db,
@@ -162,13 +159,17 @@ async fn run() -> Result<()> {
         status.set_device(&capture_device);
         status.set_ingest(&current.ingest_label());
 
-        match audio::start_capture(&capture_device) {
+        match audio::start_capture(&capture_device, current.target_rate) {
             Ok(session) => {
                 backoff.reset();
                 status.set_capture_info(
                     session.sample_rate,
                     session.channels,
                     format!("{:?}", session.format),
+                );
+                info!(
+                    "capture format: {} Hz, {} channels, {:?} (target {} Hz, 2 channels)",
+                    session.sample_rate, session.channels, session.format, current.target_rate
                 );
                 let audio::CaptureSession {
                     receiver,
@@ -221,14 +222,40 @@ async fn run() -> Result<()> {
 
 fn print_usage() {
     eprintln!("Usage:");
-    eprintln!("  lox-linein-bridge install");
-    eprintln!("  lox-linein-bridge run");
+    eprintln!("  lox-linein-bridge [--log-level <level>]");
+    eprintln!("  lox-linein-bridge [--log-level <level>] install");
     eprintln!("  lox-linein-bridge --help");
     eprintln!("  lox-linein-bridge --version");
     eprintln!();
     eprintln!("Examples:");
+    eprintln!("  lox-linein-bridge --log-level info run");
     eprintln!("  lox-linein-bridge install");
     eprintln!("  lox-linein-bridge run");
+}
+
+fn parse_args() -> Result<(Option<String>, Option<String>)> {
+    let mut args = std::env::args().skip(1);
+    let mut command = None;
+    let mut log_level = None;
+
+    while let Some(arg) = args.next() {
+        if arg == "--log-level" {
+            let level = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--log-level requires a value"))?;
+            log_level = Some(level);
+            continue;
+        }
+        if let Some(level) = arg.strip_prefix("--log-level=") {
+            log_level = Some(level.to_string());
+            continue;
+        }
+        if command.is_none() {
+            command = Some(arg);
+        }
+    }
+
+    Ok((command, log_level))
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +267,7 @@ struct RuntimeConfig {
     capture_device: Option<String>,
     vad_threshold_db: f32,
     vad_hold_ms: u64,
+    target_rate: u32,
 }
 
 impl RuntimeConfig {
@@ -252,6 +280,7 @@ impl RuntimeConfig {
             capture_device: response.capture_device,
             vad_threshold_db: response.vad_threshold_db.unwrap_or(-45.0),
             vad_hold_ms: response.vad_hold_ms.unwrap_or(2000),
+            target_rate: response.ingest_sample_rate.unwrap_or(48_000),
         }
     }
 
@@ -276,6 +305,12 @@ impl RuntimeConfig {
         if response.capture_device != self.capture_device {
             self.capture_device = response.capture_device;
             changed = true;
+        }
+        if let Some(rate) = response.ingest_sample_rate {
+            if rate != self.target_rate {
+                self.target_rate = rate;
+                changed = true;
+            }
         }
         if let Some(vad) = response.vad_threshold_db {
             if (vad - self.vad_threshold_db).abs() > f32::EPSILON {
@@ -330,6 +365,7 @@ impl RuntimeConfig {
             ingest_tcp_host: self.ingest_tcp_host.clone(),
             ingest_tcp_port: self.ingest_tcp_port,
             capture_device: self.capture_device.clone(),
+            target_rate: self.target_rate,
         }
     }
 }
@@ -341,6 +377,7 @@ struct StreamKey {
     ingest_tcp_host: Option<String>,
     ingest_tcp_port: Option<u16>,
     capture_device: Option<String>,
+    target_rate: u32,
 }
 
 fn local_identity() -> Result<(String, String)> {

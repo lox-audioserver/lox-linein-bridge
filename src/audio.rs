@@ -6,8 +6,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-const TARGET_RATE: u32 = 48_000;
-const TARGET_CHANNELS: u16 = 2;
+pub const TARGET_CHANNELS: u16 = 2;
 
 pub struct CaptureSession {
     pub receiver: mpsc::Receiver<Vec<u8>>,
@@ -47,7 +46,7 @@ pub fn list_input_device_details() -> Result<Vec<crate::models::CaptureDeviceInf
     Ok(results)
 }
 
-pub fn start_capture(device_name: &str) -> Result<CaptureSession> {
+pub fn start_capture(device_name: &str, target_rate: u32) -> Result<CaptureSession> {
     let host = select_host()?;
     let device = host
         .input_devices()
@@ -66,6 +65,7 @@ pub fn start_capture(device_name: &str) -> Result<CaptureSession> {
     let resampler = Arc::new(Mutex::new(Resampler::new(
         config.sample_rate.0,
         config.channels,
+        target_rate,
     )));
 
     let err_fn = move |err| {
@@ -199,21 +199,23 @@ fn f32_to_i16(sample: f32) -> i16 {
 
 struct Resampler {
     in_rate: u32,
+    target_rate: u32,
     pos: f64,
     buffer: Vec<f32>,
 }
 
 impl Resampler {
-    fn new(in_rate: u32, in_channels: u16) -> Self {
+    fn new(in_rate: u32, in_channels: u16, target_rate: u32) -> Self {
         Self {
             in_rate,
+            target_rate,
             pos: 0.0,
             buffer: Vec::with_capacity(in_channels as usize * 2048),
         }
     }
 
     fn needs_resample(&self, channels: u16) -> bool {
-        self.in_rate != TARGET_RATE || channels != TARGET_CHANNELS
+        self.in_rate != self.target_rate || channels != TARGET_CHANNELS
     }
 
     fn process(&mut self, input: &[f32], in_channels: u16) -> Vec<i16> {
@@ -223,8 +225,8 @@ impl Resampler {
 
         self.buffer.extend_from_slice(input);
         let in_channels_usize = in_channels as usize;
-        let step = self.in_rate as f64 / TARGET_RATE as f64;
-        let max_samples = in_channels_usize * TARGET_RATE as usize;
+        let step = self.in_rate as f64 / self.target_rate as f64;
+        let max_samples = in_channels_usize * self.target_rate as usize;
 
         if self.buffer.len() > max_samples {
             let drop_samples = self.buffer.len() - max_samples;

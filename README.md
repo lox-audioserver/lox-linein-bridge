@@ -18,14 +18,6 @@ Raspberry Pi mapping:
 
 Download the latest release for your device and place the `lox-linein-bridge` binary in `/usr/local/bin/`.
 
-## Run (systemd)
-
-```bash
-lox-linein-bridge run
-```
-
-This is only meant for systemd. It discovers the server over mDNS, registers the bridge, and streams PCM audio based on server config.
-
 ## Install (systemd)
 
 ```bash
@@ -34,10 +26,37 @@ sudo lox-linein-bridge install
 
 This writes the systemd unit, reloads systemd, and enables + starts the service.
 
+## Run (systemd)
+
+```bash
+lox-linein-bridge
+```
+
+This is only meant for systemd or manual troubleshooting; you do not need to run it after `install`.
+
+## Troubleshooting
+
+Start manually with logs:
+
+```bash
+lox-linein-bridge --log-level info
+```
+
+Log levels: `off` (default), `error`, `warn`, `info`, `debug`, `trace`.
+
 mDNS discovery looks for `_loxaudio._tcp` and uses TXT fields:
 - `api` (default `/api`)
 - `linein_register` (default `/api/linein/bridges/register`)
 - `linein_status` (default `/api/linein/bridges/{bridge_id}/status`)
+
+## Audio ingest protocol
+
+The bridge streams raw PCM over TCP:
+- Connect to `ingest_tcp_host:ingest_tcp_port`
+- First line: `<assigned_input_id>\n`
+- Then continuous raw PCM `s16le`, `48 kHz`, `2 channels` (rate can be overridden by server)
+
+Status updates are sent separately and must not reset the audio stream.
 
 ## Voice activity detection (VAD)
 
