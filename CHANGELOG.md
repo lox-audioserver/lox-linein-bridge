@@ -1,3 +1,10 @@
+# [1.6.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.5.0...v1.6.0) (2026-01-19)
+
+
+### Features
+
+* make ingest sample rate server-driven and resample dynamically ([37704b5](https://github.com/lox-audioserver/lox-linein-bridge/commit/37704b5d380f138932f7b915725857665731a520))
+
 # [1.5.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.4.0...v1.5.0) (2026-01-18)
 
 
