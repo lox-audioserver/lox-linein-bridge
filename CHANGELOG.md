@@ -1,3 +1,10 @@
+## [1.9.1](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.9.0...v1.9.1) (2026-01-19)
+
+
+### Bug Fixes
+
+* match pacing interval to chunk size ([306bdd5](https://github.com/lox-audioserver/lox-linein-bridge/commit/306bdd5c2dffc2a54278a3d56d27c95e782fc0df))
+
 # [1.9.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.8.1...v1.9.0) (2026-01-19)
 
 
