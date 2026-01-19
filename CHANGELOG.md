@@ -1,3 +1,10 @@
+# [1.9.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.8.1...v1.9.0) (2026-01-19)
+
+
+### Features
+
+* stabilize streaming timing with paced output and realtime tuning ([f5213b4](https://github.com/lox-audioserver/lox-linein-bridge/commit/f5213b4961e56026f006987e7ebbdb4152abd5ab))
+
 ## [1.8.1](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.8.0...v1.8.1) (2026-01-19)
 
 
