@@ -1,3 +1,10 @@
+## [1.6.3](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.6.2...v1.6.3) (2026-01-19)
+
+
+### Bug Fixes
+
+* log observed input sample rate regularly ([a11c0ee](https://github.com/lox-audioserver/lox-linein-bridge/commit/a11c0eeb91e9998d830733d6755baa73c4b834cc))
+
 ## [1.6.2](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.6.1...v1.6.2) (2026-01-19)
 
 
