@@ -40,7 +40,7 @@ impl ResamplerMode {
 }
 
 pub struct CaptureSession {
-    pub receiver: mpsc::Receiver<Vec<u8>>,
+    pub receiver: mpsc::UnboundedReceiver<Vec<u8>>,
     pub error_receiver: mpsc::Receiver<String>,
     pub stream: cpal::Stream,
     pub sample_rate: u32,
@@ -115,7 +115,7 @@ pub fn start_capture(
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.into();
 
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
+    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (err_tx, err_rx) = mpsc::channel::<String>(4);
     let observed_rate = Arc::new(Mutex::new(None));
     let resampler = Arc::new(Mutex::new(Resampler::new(
@@ -200,7 +200,7 @@ fn handle_samples_f32(
     data: &[f32],
     channels: u16,
     resampler: &Arc<Mutex<Resampler>>,
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::UnboundedSender<Vec<u8>>,
 ) {
     let output = {
         let mut resampler = match resampler.lock() {
@@ -224,7 +224,7 @@ fn handle_samples_f32(
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
 
-    let _ = tx.try_send(bytes);
+    let _ = tx.send(bytes);
 }
 
 fn convert_direct_to_i16(data: &[f32], channels: u16) -> Vec<i16> {

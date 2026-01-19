@@ -1,6 +1,7 @@
 use crate::models::BridgeStatusRequest;
 use anyhow::{Context, Result};
 use futures_util::SinkExt;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -8,7 +9,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::info;
+use tracing::{info, warn};
 
 type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 const TRACK_GAP_MS: u64 = 2000;
@@ -169,7 +170,7 @@ pub enum IngestTarget {
 
 pub struct StreamParams {
     pub ingest: IngestTarget,
-    pub rx: mpsc::Receiver<Vec<u8>>,
+    pub rx: mpsc::UnboundedReceiver<Vec<u8>>,
     pub err_rx: mpsc::Receiver<String>,
     pub threshold_db: f32,
     pub hold_duration: Duration,
@@ -199,8 +200,11 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
     let mut last_rate_log = Instant::now();
     let mut bytes_since_log: u64 = 0;
     let chunk_bytes = chunk_bytes_for_rate(params.output_rate);
-    let mut pending = Vec::with_capacity(chunk_bytes * 4);
-    let mut pending_offset = 0usize;
+    let max_pending = max_buffer_bytes_for_rate(params.output_rate);
+    let mut pending = VecDeque::with_capacity(max_pending);
+    let mut overrun_since = Instant::now();
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut stream: Option<TcpStream> = None;
     loop {
@@ -225,8 +229,18 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
             maybe_chunk = params.rx.recv() => {
                 match maybe_chunk {
                     Some(chunk) => {
-                        pending.extend_from_slice(&chunk);
                         let rms_db = rms_db_from_pcm_i16_le(&chunk);
+                        pending.extend(chunk);
+                        if pending.len() > max_pending {
+                            let overflow = pending.len() - max_pending;
+                            for _ in 0..overflow {
+                                pending.pop_front();
+                            }
+                            if overrun_since.elapsed() >= Duration::from_secs(5) {
+                                warn!("audio buffer overrun, dropping {} bytes", overflow);
+                                overrun_since = Instant::now();
+                            }
+                        }
                         params.status.set_rms_db(rms_db);
                         if let Some(rms_db) = rms_db {
                             let now = Instant::now();
@@ -250,6 +264,7 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
                                 info!("audio detected, streaming (rms_db={:.1})", rms_db);
                             } else if !gate.active && was_active {
                                 idle_since = Some(now);
+                                pending.clear();
                                 info!("silence detected, pausing stream (rms_db={:.1})", rms_db);
                             }
                         }
@@ -259,39 +274,59 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
                             continue;
                         }
 
-                        if let Some(writer) = stream.as_mut() {
-                            while pending.len() - pending_offset >= chunk_bytes {
-                                let end = pending_offset + chunk_bytes;
-                                if let Err(err) = writer.write_all(&pending[pending_offset..end]).await
-                                {
-                                    params.status.set_last_error(Some(err.to_string()));
-                                    stream = None;
-                                    break;
-                                }
-                                params.status.set_state("STREAMING");
-                                params.status.record_bytes(chunk_bytes);
-                                bytes_since_log += chunk_bytes as u64;
-                                pending_offset = end;
-                                if pending_offset >= pending.len() / 2 {
-                                    pending.drain(0..pending_offset);
-                                    pending_offset = 0;
-                                }
-                                if last_rate_log.elapsed() >= Duration::from_secs(5) {
-                                    let secs = last_rate_log.elapsed().as_secs_f64();
-                                    let bytes_per_sec = (bytes_since_log as f64 / secs).round();
-                                    let est_rate = bytes_per_sec / 4.0;
-                                    info!(
-                                        "stream throughput: {} B/s (~{:.0} Hz)",
-                                        bytes_per_sec, est_rate
-                                    );
-                                    bytes_since_log = 0;
-                                    last_rate_log = Instant::now();
-                                }
-                            }
-                        }
+                        // paced writes happen on the interval tick
                     }
                     None => {
                         return Err(anyhow::anyhow!("audio capture channel closed"));
+                    }
+                }
+            }
+            _ = tick.tick() => {
+                if !gate.active {
+                    continue;
+                }
+                if let Some(writer) = stream.as_mut() {
+                    if pending.len() < chunk_bytes {
+                        let missing = chunk_bytes - pending.len();
+                        let mut payload = Vec::with_capacity(chunk_bytes);
+                        while let Some(value) = pending.pop_front() {
+                            payload.push(value);
+                        }
+                        payload.extend(std::iter::repeat(0u8).take(missing));
+                        if let Err(err) = writer.write_all(&payload).await {
+                            params.status.set_last_error(Some(err.to_string()));
+                            stream = None;
+                        } else {
+                            params.status.set_state("STREAMING");
+                            params.status.record_bytes(chunk_bytes);
+                            bytes_since_log += chunk_bytes as u64;
+                        }
+                    } else {
+                        let mut payload = Vec::with_capacity(chunk_bytes);
+                        for _ in 0..chunk_bytes {
+                            if let Some(value) = pending.pop_front() {
+                                payload.push(value);
+                            }
+                        }
+                        if let Err(err) = writer.write_all(&payload).await {
+                            params.status.set_last_error(Some(err.to_string()));
+                            stream = None;
+                        } else {
+                            params.status.set_state("STREAMING");
+                            params.status.record_bytes(chunk_bytes);
+                            bytes_since_log += chunk_bytes as u64;
+                        }
+                    }
+                    if last_rate_log.elapsed() >= Duration::from_secs(5) {
+                        let secs = last_rate_log.elapsed().as_secs_f64();
+                        let bytes_per_sec = (bytes_since_log as f64 / secs).round();
+                        let est_rate = bytes_per_sec / 4.0;
+                        info!(
+                            "stream throughput: {} B/s (~{:.0} Hz)",
+                            bytes_per_sec, est_rate
+                        );
+                        bytes_since_log = 0;
+                        last_rate_log = Instant::now();
                     }
                 }
             }
@@ -332,8 +367,11 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
     let mut last_rate_log = Instant::now();
     let mut bytes_since_log: u64 = 0;
     let chunk_bytes = chunk_bytes_for_rate(params.output_rate);
-    let mut pending = Vec::with_capacity(chunk_bytes * 4);
-    let mut pending_offset = 0usize;
+    let max_pending = max_buffer_bytes_for_rate(params.output_rate);
+    let mut pending = VecDeque::with_capacity(max_pending);
+    let mut overrun_since = Instant::now();
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut stream = None;
     loop {
@@ -358,8 +396,18 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
             maybe_chunk = params.rx.recv() => {
                 match maybe_chunk {
                     Some(chunk) => {
-                        pending.extend_from_slice(&chunk);
                         let rms_db = rms_db_from_pcm_i16_le(&chunk);
+                        pending.extend(chunk);
+                        if pending.len() > max_pending {
+                            let overflow = pending.len() - max_pending;
+                            for _ in 0..overflow {
+                                pending.pop_front();
+                            }
+                            if overrun_since.elapsed() >= Duration::from_secs(5) {
+                                warn!("audio buffer overrun, dropping {} bytes", overflow);
+                                overrun_since = Instant::now();
+                            }
+                        }
                         params.status.set_rms_db(rms_db);
                         if let Some(rms_db) = rms_db {
                             let now = Instant::now();
@@ -383,6 +431,7 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
                                 info!("audio detected, streaming (rms_db={:.1})", rms_db);
                             } else if !gate.active && was_active {
                                 idle_since = Some(now);
+                                pending.clear();
                                 info!("silence detected, pausing stream (rms_db={:.1})", rms_db);
                             }
                         }
@@ -392,39 +441,53 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
                             continue;
                         }
 
-                        if let Some(writer) = stream.as_mut() {
-                            while pending.len() - pending_offset >= chunk_bytes {
-                                let end = pending_offset + chunk_bytes;
-                                let payload = pending[pending_offset..end].to_vec();
-                                if let Err(err) = writer.send(Message::Binary(payload)).await {
-                                    params.status.set_last_error(Some(err.to_string()));
-                                    stream = None;
-                                    break;
-                                }
-                                params.status.set_state("STREAMING");
-                                params.status.record_bytes(chunk_bytes);
-                                bytes_since_log += chunk_bytes as u64;
-                                pending_offset = end;
-                                if pending_offset >= pending.len() / 2 {
-                                    pending.drain(0..pending_offset);
-                                    pending_offset = 0;
-                                }
-                                if last_rate_log.elapsed() >= Duration::from_secs(5) {
-                                    let secs = last_rate_log.elapsed().as_secs_f64();
-                                    let bytes_per_sec = (bytes_since_log as f64 / secs).round();
-                                    let est_rate = bytes_per_sec / 4.0;
-                                    info!(
-                                        "stream throughput: {} B/s (~{:.0} Hz)",
-                                        bytes_per_sec, est_rate
-                                    );
-                                    bytes_since_log = 0;
-                                    last_rate_log = Instant::now();
-                                }
-                            }
-                        }
+                        // paced writes happen on the interval tick
                     }
                     None => {
                         return Err(anyhow::anyhow!("audio capture channel closed"));
+                    }
+                }
+            }
+            _ = tick.tick() => {
+                if !gate.active {
+                    continue;
+                }
+                if let Some(writer) = stream.as_mut() {
+                    let payload = if pending.len() < chunk_bytes {
+                        let missing = chunk_bytes - pending.len();
+                        let mut buffer = Vec::with_capacity(chunk_bytes);
+                        while let Some(value) = pending.pop_front() {
+                            buffer.push(value);
+                        }
+                        buffer.extend(std::iter::repeat(0u8).take(missing));
+                        buffer
+                    } else {
+                        let mut buffer = Vec::with_capacity(chunk_bytes);
+                        for _ in 0..chunk_bytes {
+                            if let Some(value) = pending.pop_front() {
+                                buffer.push(value);
+                            }
+                        }
+                        buffer
+                    };
+                    if let Err(err) = writer.send(Message::Binary(payload)).await {
+                        params.status.set_last_error(Some(err.to_string()));
+                        stream = None;
+                    } else {
+                        params.status.set_state("STREAMING");
+                        params.status.record_bytes(chunk_bytes);
+                        bytes_since_log += chunk_bytes as u64;
+                    }
+                    if last_rate_log.elapsed() >= Duration::from_secs(5) {
+                        let secs = last_rate_log.elapsed().as_secs_f64();
+                        let bytes_per_sec = (bytes_since_log as f64 / secs).round();
+                        let est_rate = bytes_per_sec / 4.0;
+                        info!(
+                            "stream throughput: {} B/s (~{:.0} Hz)",
+                            bytes_per_sec, est_rate
+                        );
+                        bytes_since_log = 0;
+                        last_rate_log = Instant::now();
                     }
                 }
             }
@@ -551,4 +614,9 @@ fn chunk_bytes_for_rate(rate: u32) -> usize {
     let bytes_per_sec = rate.saturating_mul(4);
     let bytes = bytes_per_sec.saturating_mul(chunk_ms) / 1000;
     bytes.max(4) as usize
+}
+
+fn max_buffer_bytes_for_rate(rate: u32) -> usize {
+    let buffer_seconds = 2u32;
+    rate.saturating_mul(4).saturating_mul(buffer_seconds) as usize
 }
