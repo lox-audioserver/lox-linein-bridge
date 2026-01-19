@@ -1,12 +1,43 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{HostId, SampleFormat, StreamConfig};
+use rubato::{
+    Resampler as RubatoResampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction,
+};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::warn;
 
 pub const TARGET_CHANNELS: u16 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResamplerMode {
+    Linear,
+    SincFast,
+    SincQuality,
+}
+
+impl ResamplerMode {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_lowercase().as_str() {
+            "linear" | "basic" => Some(Self::Linear),
+            "sinc" | "rubato" | "quality" | "hq" => Some(Self::SincQuality),
+            "sinc-fast" | "fast" | "medium" => Some(Self::SincFast),
+            _ => None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::SincFast => "sinc-fast",
+            Self::SincQuality => "sinc",
+        }
+    }
+}
 
 pub struct CaptureSession {
     pub receiver: mpsc::Receiver<Vec<u8>>,
@@ -46,7 +77,11 @@ pub fn list_input_device_details() -> Result<Vec<crate::models::CaptureDeviceInf
     Ok(results)
 }
 
-pub fn start_capture(device_name: &str, target_rate: u32) -> Result<CaptureSession> {
+pub fn start_capture(
+    device_name: &str,
+    target_rate: u32,
+    resampler_mode: ResamplerMode,
+) -> Result<CaptureSession> {
     let host = select_host()?;
     let device = host
         .input_devices()
@@ -54,9 +89,28 @@ pub fn start_capture(device_name: &str, target_rate: u32) -> Result<CaptureSessi
         .find(|dev| dev.name().map(|name| name == device_name).unwrap_or(false))
         .context("capture device not found")?;
 
-    let supported = device
-        .default_input_config()
-        .context("read default input config")?;
+    let supported_configs = device
+        .supported_input_configs()
+        .context("read supported input configs")?;
+    let mut selected = None;
+    for config in supported_configs {
+        if config.channels() != TARGET_CHANNELS {
+            continue;
+        }
+        let min = config.min_sample_rate().0;
+        let max = config.max_sample_rate().0;
+        if target_rate >= min && target_rate <= max {
+            selected = Some(config.with_sample_rate(cpal::SampleRate(target_rate)));
+            break;
+        }
+    }
+
+    let supported = match selected {
+        Some(config) => config,
+        None => device
+            .default_input_config()
+            .context("read default input config")?,
+    };
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.into();
 
@@ -66,7 +120,8 @@ pub fn start_capture(device_name: &str, target_rate: u32) -> Result<CaptureSessi
         config.sample_rate.0,
         config.channels,
         target_rate,
-    )));
+        resampler_mode,
+    )?));
 
     let err_fn = move |err| {
         let message = format!("capture error: {}", err);
@@ -148,7 +203,7 @@ fn handle_samples_f32(
             Ok(guard) => guard,
             Err(_) => return,
         };
-        if resampler.needs_resample(channels) {
+        if resampler.needs_resample_rate() {
             resampler.process(data, channels)
         } else {
             convert_direct_to_i16(data, channels)
@@ -198,24 +253,45 @@ fn f32_to_i16(sample: f32) -> i16 {
 }
 
 struct Resampler {
+    mode: ResamplerMode,
     in_rate: u32,
     target_rate: u32,
-    pos: f64,
-    buffer: Vec<f32>,
+    linear: LinearResampler,
+    sinc: Option<SincResampler>,
+    rate_frames: u64,
+    rate_start: Instant,
 }
 
 impl Resampler {
-    fn new(in_rate: u32, in_channels: u16, target_rate: u32) -> Self {
-        Self {
+    fn new(in_rate: u32, in_channels: u16, target_rate: u32, mode: ResamplerMode) -> Result<Self> {
+        let sinc = match mode {
+            ResamplerMode::Linear => None,
+            ResamplerMode::SincFast => Some(SincResampler::new(
+                in_rate,
+                target_rate,
+                SincQuality::Fast,
+                in_channels,
+            )?),
+            ResamplerMode::SincQuality => Some(SincResampler::new(
+                in_rate,
+                target_rate,
+                SincQuality::Quality,
+                in_channels,
+            )?),
+        };
+        Ok(Self {
+            mode,
             in_rate,
             target_rate,
-            pos: 0.0,
-            buffer: Vec::with_capacity(in_channels as usize * 2048),
-        }
+            linear: LinearResampler::new(in_channels),
+            sinc,
+            rate_frames: 0,
+            rate_start: Instant::now(),
+        })
     }
 
-    fn needs_resample(&self, channels: u16) -> bool {
-        self.in_rate != self.target_rate || channels != TARGET_CHANNELS
+    fn needs_resample_rate(&self) -> bool {
+        self.in_rate != self.target_rate
     }
 
     fn process(&mut self, input: &[f32], in_channels: u16) -> Vec<i16> {
@@ -223,10 +299,97 @@ impl Resampler {
             return Vec::new();
         }
 
+        self.track_input_rate(input.len(), in_channels);
+        match self.mode {
+            ResamplerMode::Linear => {
+                self.linear
+                    .process(input, in_channels, self.in_rate, self.target_rate)
+            }
+            ResamplerMode::SincFast | ResamplerMode::SincQuality => {
+                if let Some(sinc) = self.sinc.as_mut() {
+                    sinc.process(input, in_channels)
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    fn track_input_rate(&mut self, samples: usize, in_channels: u16) {
+        let frames = samples / in_channels as usize;
+        self.rate_frames = self.rate_frames.saturating_add(frames as u64);
+        let elapsed = self.rate_start.elapsed();
+        if elapsed < Duration::from_secs(2) {
+            return;
+        }
+        let observed = (self.rate_frames as f64 / elapsed.as_secs_f64()).round() as u32;
+        if observed > 0 && observed != self.in_rate {
+            self.in_rate = observed;
+            self.reset_resampler();
+        }
+        self.rate_frames = 0;
+        self.rate_start = Instant::now();
+    }
+
+    fn reset_resampler(&mut self) {
+        match self.mode {
+            ResamplerMode::Linear => {
+                self.linear.reset();
+            }
+            ResamplerMode::SincFast => {
+                if let Some(sinc) = self.sinc.as_mut() {
+                    if let Err(err) = sinc.reset(self.in_rate, self.target_rate, SincQuality::Fast)
+                    {
+                        warn!("resampler reset failed: {}", err);
+                    }
+                }
+            }
+            ResamplerMode::SincQuality => {
+                if let Some(sinc) = self.sinc.as_mut() {
+                    if let Err(err) =
+                        sinc.reset(self.in_rate, self.target_rate, SincQuality::Quality)
+                    {
+                        warn!("resampler reset failed: {}", err);
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct LinearResampler {
+    pos: f64,
+    buffer: Vec<f32>,
+}
+
+impl LinearResampler {
+    fn new(in_channels: u16) -> Self {
+        Self {
+            pos: 0.0,
+            buffer: Vec::with_capacity(in_channels as usize * 2048),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.pos = 0.0;
+        self.buffer.clear();
+    }
+
+    fn process(
+        &mut self,
+        input: &[f32],
+        in_channels: u16,
+        in_rate: u32,
+        target_rate: u32,
+    ) -> Vec<i16> {
+        if input.is_empty() || in_channels == 0 {
+            return Vec::new();
+        }
+
         self.buffer.extend_from_slice(input);
         let in_channels_usize = in_channels as usize;
-        let step = self.in_rate as f64 / self.target_rate as f64;
-        let max_samples = in_channels_usize * self.target_rate as usize;
+        let step = in_rate as f64 / target_rate as f64;
+        let max_samples = in_channels_usize * target_rate as usize;
 
         if self.buffer.len() > max_samples {
             let drop_samples = self.buffer.len() - max_samples;
@@ -268,4 +431,120 @@ impl Resampler {
 
         out
     }
+}
+
+#[derive(Clone, Copy)]
+enum SincQuality {
+    Fast,
+    Quality,
+}
+
+struct SincResampler {
+    resampler: SincFixedIn<f32>,
+    pending_left: Vec<f32>,
+    pending_right: Vec<f32>,
+    pending_offset: usize,
+}
+
+impl SincResampler {
+    fn new(in_rate: u32, target_rate: u32, quality: SincQuality, in_channels: u16) -> Result<Self> {
+        let resampler = build_sinc_resampler(in_rate, target_rate, quality)?;
+        Ok(Self {
+            resampler,
+            pending_left: Vec::with_capacity(in_channels as usize * 2048),
+            pending_right: Vec::with_capacity(in_channels as usize * 2048),
+            pending_offset: 0,
+        })
+    }
+
+    fn reset(&mut self, in_rate: u32, target_rate: u32, quality: SincQuality) -> Result<()> {
+        self.resampler = build_sinc_resampler(in_rate, target_rate, quality)?;
+        self.pending_left.clear();
+        self.pending_right.clear();
+        self.pending_offset = 0;
+        Ok(())
+    }
+
+    fn process(&mut self, input: &[f32], in_channels: u16) -> Vec<i16> {
+        self.push_stereo_frames(input, in_channels);
+
+        let mut out = Vec::new();
+        loop {
+            let needed = self.resampler.input_frames_next();
+            let available = self.pending_left.len().saturating_sub(self.pending_offset);
+            if available < needed {
+                break;
+            }
+            let start = self.pending_offset;
+            let end = start + needed;
+            let input_chunk = vec![
+                self.pending_left[start..end].to_vec(),
+                self.pending_right[start..end].to_vec(),
+            ];
+            match self.resampler.process(&input_chunk, None) {
+                Ok(output) => out.extend(interleave_to_i16(&output)),
+                Err(err) => {
+                    warn!("resampler failed: {}", err);
+                    break;
+                }
+            }
+            self.pending_offset = end;
+            if self.pending_offset >= self.pending_left.len() / 2 {
+                self.pending_left.drain(0..self.pending_offset);
+                self.pending_right.drain(0..self.pending_offset);
+                self.pending_offset = 0;
+            }
+        }
+
+        out
+    }
+
+    fn push_stereo_frames(&mut self, input: &[f32], in_channels: u16) {
+        let in_channels_usize = in_channels as usize;
+        let frames = input.len() / in_channels_usize;
+        let mut idx = 0;
+        for _ in 0..frames {
+            let frame = &input[idx..idx + in_channels_usize];
+            let (left, right) = map_channels(frame, in_channels);
+            self.pending_left.push(left);
+            self.pending_right.push(right);
+            idx += in_channels_usize;
+        }
+    }
+}
+
+fn build_sinc_resampler(
+    in_rate: u32,
+    target_rate: u32,
+    quality: SincQuality,
+) -> Result<SincFixedIn<f32>> {
+    let (sinc_len, oversampling_factor, interpolation, f_cutoff) = match quality {
+        SincQuality::Fast => (128, 64, SincInterpolationType::Quadratic, 0.9),
+        SincQuality::Quality => (256, 256, SincInterpolationType::Cubic, 0.95),
+    };
+    let params = SincInterpolationParameters {
+        sinc_len,
+        f_cutoff,
+        interpolation,
+        oversampling_factor,
+        window: WindowFunction::BlackmanHarris2,
+    };
+    let ratio = target_rate as f64 / in_rate as f64;
+    let resampler = SincFixedIn::<f32>::new(ratio, 2.0, params, 1024, TARGET_CHANNELS as usize)?;
+    Ok(resampler)
+}
+
+fn interleave_to_i16(output: &[Vec<f32>]) -> Vec<i16> {
+    if output.len() < TARGET_CHANNELS as usize {
+        return Vec::new();
+    }
+    let left = &output[0];
+    let right = &output[1];
+    let frames = left.len().min(right.len());
+    let mut out = Vec::with_capacity(frames * 2);
+    for idx in 0..frames {
+        out.push(f32_to_i16(left[idx]));
+        out.push(f32_to_i16(right[idx]));
+    }
+    out
 }

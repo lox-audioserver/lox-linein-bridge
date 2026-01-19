@@ -114,12 +114,13 @@ async fn run() -> Result<()> {
                 Ok(update) => {
                     if let Some(updated) = runtime.update(update) {
                         info!(
-                            "config update: assigned_input_id={:?}, capture_device={:?}, vad_threshold_db={}, vad_hold_ms={}, target_rate={}",
+                            "config update: assigned_input_id={:?}, capture_device={:?}, vad_threshold_db={}, vad_hold_ms={}, target_rate={}, resampler={}",
                             updated.assigned_input_id,
                             updated.capture_device,
                             updated.vad_threshold_db,
                             updated.vad_hold_ms,
-                            updated.target_rate
+                            updated.target_rate,
+                            updated.resampler.label()
                         );
                         let _ = vad_tx.send((
                             updated.vad_threshold_db,
@@ -159,7 +160,7 @@ async fn run() -> Result<()> {
         status.set_device(&capture_device);
         status.set_ingest(&current.ingest_label());
 
-        match audio::start_capture(&capture_device, current.target_rate) {
+        match audio::start_capture(&capture_device, current.target_rate, current.resampler) {
             Ok(session) => {
                 backoff.reset();
                 status.set_capture_info(
@@ -168,8 +169,12 @@ async fn run() -> Result<()> {
                     format!("{:?}", session.format),
                 );
                 info!(
-                    "capture format: {} Hz, {} channels, {:?} (target {} Hz, 2 channels)",
-                    session.sample_rate, session.channels, session.format, current.target_rate
+                    "capture format: {} Hz, {} channels, {:?} (target {} Hz, 2 channels, resampler={})",
+                    session.sample_rate,
+                    session.channels,
+                    session.format,
+                    current.target_rate,
+                    current.resampler.label()
                 );
                 let audio::CaptureSession {
                     receiver,
@@ -268,6 +273,7 @@ struct RuntimeConfig {
     vad_threshold_db: f32,
     vad_hold_ms: u64,
     target_rate: u32,
+    resampler: audio::ResamplerMode,
 }
 
 impl RuntimeConfig {
@@ -281,6 +287,7 @@ impl RuntimeConfig {
             vad_threshold_db: response.vad_threshold_db.unwrap_or(-45.0),
             vad_hold_ms: response.vad_hold_ms.unwrap_or(2000),
             target_rate: response.ingest_sample_rate.unwrap_or(48_000),
+            resampler: parse_resampler(response.ingest_resampler.as_deref()),
         }
     }
 
@@ -309,6 +316,13 @@ impl RuntimeConfig {
         if let Some(rate) = response.ingest_sample_rate {
             if rate != self.target_rate {
                 self.target_rate = rate;
+                changed = true;
+            }
+        }
+        if let Some(mode) = response.ingest_resampler {
+            let next = parse_resampler(Some(mode.as_str()));
+            if next != self.resampler {
+                self.resampler = next;
                 changed = true;
             }
         }
@@ -366,6 +380,7 @@ impl RuntimeConfig {
             ingest_tcp_port: self.ingest_tcp_port,
             capture_device: self.capture_device.clone(),
             target_rate: self.target_rate,
+            resampler: self.resampler,
         }
     }
 }
@@ -378,6 +393,7 @@ struct StreamKey {
     ingest_tcp_port: Option<u16>,
     capture_device: Option<String>,
     target_rate: u32,
+    resampler: audio::ResamplerMode,
 }
 
 fn local_identity() -> Result<(String, String)> {
@@ -400,6 +416,12 @@ fn local_identity() -> Result<(String, String)> {
         .map(|mac| mac.to_string())
         .unwrap_or_else(|| "00:00:00:00:00:00".to_string());
     Ok((ip, mac))
+}
+
+fn parse_resampler(value: Option<&str>) -> audio::ResamplerMode {
+    value
+        .and_then(audio::ResamplerMode::parse)
+        .unwrap_or(audio::ResamplerMode::SincQuality)
 }
 
 fn hash_capture_devices(devices: &[models::CaptureDeviceInfo]) -> u64 {

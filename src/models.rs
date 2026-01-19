@@ -43,4 +43,5 @@ pub struct BridgeConfigResponse {
     pub vad_threshold_db: Option<f32>,
     pub vad_hold_ms: Option<u64>,
     pub ingest_sample_rate: Option<u32>,
+    pub ingest_resampler: Option<String>,
 }

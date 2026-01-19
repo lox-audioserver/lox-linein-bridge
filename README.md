@@ -54,7 +54,7 @@ mDNS discovery looks for `_loxaudio._tcp` and uses TXT fields:
 The bridge streams raw PCM over TCP:
 - Connect to `ingest_tcp_host:ingest_tcp_port`
 - First line: `<assigned_input_id>\n`
-- Then continuous raw PCM `s16le`, `48 kHz`, `2 channels` (rate can be overridden by server)
+- Then continuous raw PCM `s16le`, `48 kHz`, `2 channels` (rate and resampler can be overridden by server)
 
 Status updates are sent separately and must not reset the audio stream.
 
@@ -65,6 +65,8 @@ To reduce bandwidth, the bridge uses a simple RMS-based gate. It only streams wh
 Tuning comes from the server's line-in ingest settings:
 - `vad_threshold_db` (default: `-45.0` when unset)
 - `vad_hold_ms` (default: `2000` when unset)
+- `ingest_sample_rate` (default: `48000` when unset)
+- `ingest_resampler` (default: `sinc` when unset, options: `linear`, `sinc-fast`, `sinc`)
 
 Example `GET /api/linein/{id}/ingest` response:
 ```json
@@ -73,7 +75,9 @@ Example `GET /api/linein/{id}/ingest` response:
   "ingest_tcp_host": "192.168.1.209",
   "ingest_tcp_port": 7080,
   "vad_threshold_db": -45.0,
-  "vad_hold_ms": 2000
+  "vad_hold_ms": 2000,
+  "ingest_sample_rate": 48000,
+  "ingest_resampler": "sinc"
 }
 ```
 
