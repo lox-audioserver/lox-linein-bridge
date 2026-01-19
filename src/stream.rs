@@ -26,6 +26,7 @@ struct StatusState {
     rate: Option<u32>,
     channels: Option<u16>,
     format: Option<String>,
+    observed_rate: Option<u32>,
     rms_db: Option<f32>,
     track_change: bool,
     bytes_sent_total: u64,
@@ -43,6 +44,7 @@ impl StatusHandle {
                 rate: None,
                 channels: None,
                 format: None,
+                observed_rate: None,
                 rms_db: None,
                 track_change: false,
                 bytes_sent_total: 0,
@@ -74,6 +76,12 @@ impl StatusHandle {
             inner.rate = Some(rate);
             inner.channels = Some(channels);
             inner.format = Some(format);
+        }
+    }
+
+    pub fn set_observed_rate(&self, rate: u32) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.observed_rate = Some(rate);
         }
     }
 
@@ -133,6 +141,7 @@ impl StatusHandle {
             rate: inner.rate,
             channels: inner.channels,
             format: inner.format.clone(),
+            observed_rate: inner.observed_rate,
             rms_db: inner.rms_db,
             last_error: inner.last_error.clone(),
             track_change,
@@ -166,6 +175,7 @@ pub struct StreamParams {
     pub hold_duration: Duration,
     pub vad_updates: Option<tokio::sync::watch::Receiver<(f32, Duration)>>,
     pub status: StatusHandle,
+    pub output_rate: u32,
 }
 
 pub async fn stream_audio(mut params: StreamParams) -> Result<()> {
@@ -188,6 +198,9 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
     let mut idle_since: Option<Instant> = None;
     let mut last_rate_log = Instant::now();
     let mut bytes_since_log: u64 = 0;
+    let chunk_bytes = chunk_bytes_for_rate(params.output_rate);
+    let mut pending = Vec::with_capacity(chunk_bytes * 4);
+    let mut pending_offset = 0usize;
 
     let mut stream: Option<TcpStream> = None;
     loop {
@@ -212,6 +225,7 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
             maybe_chunk = params.rx.recv() => {
                 match maybe_chunk {
                     Some(chunk) => {
+                        pending.extend_from_slice(&chunk);
                         let rms_db = rms_db_from_pcm_i16_le(&chunk);
                         params.status.set_rms_db(rms_db);
                         if let Some(rms_db) = rms_db {
@@ -230,6 +244,7 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
                                         >= Duration::from_millis(TRACK_GAP_MS)
                                     {
                                         params.status.set_track_change();
+                                        info!("track change detected");
                                     }
                                 }
                                 info!("audio detected, streaming (rms_db={:.1})", rms_db);
@@ -245,13 +260,22 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
                         }
 
                         if let Some(writer) = stream.as_mut() {
-                            if let Err(err) = writer.write_all(&chunk).await {
-                                params.status.set_last_error(Some(err.to_string()));
-                                stream = None;
-                            } else {
+                            while pending.len() - pending_offset >= chunk_bytes {
+                                let end = pending_offset + chunk_bytes;
+                                if let Err(err) = writer.write_all(&pending[pending_offset..end]).await
+                                {
+                                    params.status.set_last_error(Some(err.to_string()));
+                                    stream = None;
+                                    break;
+                                }
                                 params.status.set_state("STREAMING");
-                                params.status.record_bytes(chunk.len());
-                                bytes_since_log += chunk.len() as u64;
+                                params.status.record_bytes(chunk_bytes);
+                                bytes_since_log += chunk_bytes as u64;
+                                pending_offset = end;
+                                if pending_offset >= pending.len() / 2 {
+                                    pending.drain(0..pending_offset);
+                                    pending_offset = 0;
+                                }
                                 if last_rate_log.elapsed() >= Duration::from_secs(5) {
                                     let secs = last_rate_log.elapsed().as_secs_f64();
                                     let bytes_per_sec = (bytes_since_log as f64 / secs).round();
@@ -307,6 +331,9 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
     let mut idle_since: Option<Instant> = None;
     let mut last_rate_log = Instant::now();
     let mut bytes_since_log: u64 = 0;
+    let chunk_bytes = chunk_bytes_for_rate(params.output_rate);
+    let mut pending = Vec::with_capacity(chunk_bytes * 4);
+    let mut pending_offset = 0usize;
 
     let mut stream = None;
     loop {
@@ -331,6 +358,7 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
             maybe_chunk = params.rx.recv() => {
                 match maybe_chunk {
                     Some(chunk) => {
+                        pending.extend_from_slice(&chunk);
                         let rms_db = rms_db_from_pcm_i16_le(&chunk);
                         params.status.set_rms_db(rms_db);
                         if let Some(rms_db) = rms_db {
@@ -349,6 +377,7 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
                                         >= Duration::from_millis(TRACK_GAP_MS)
                                     {
                                         params.status.set_track_change();
+                                        info!("track change detected");
                                     }
                                 }
                                 info!("audio detected, streaming (rms_db={:.1})", rms_db);
@@ -364,14 +393,22 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
                         }
 
                         if let Some(writer) = stream.as_mut() {
-                            let chunk_len = chunk.len();
-                            if let Err(err) = writer.send(Message::Binary(chunk)).await {
-                                params.status.set_last_error(Some(err.to_string()));
-                                stream = None;
-                            } else {
+                            while pending.len() - pending_offset >= chunk_bytes {
+                                let end = pending_offset + chunk_bytes;
+                                let payload = pending[pending_offset..end].to_vec();
+                                if let Err(err) = writer.send(Message::Binary(payload)).await {
+                                    params.status.set_last_error(Some(err.to_string()));
+                                    stream = None;
+                                    break;
+                                }
                                 params.status.set_state("STREAMING");
-                                params.status.record_bytes(chunk_len);
-                                bytes_since_log += chunk_len as u64;
+                                params.status.record_bytes(chunk_bytes);
+                                bytes_since_log += chunk_bytes as u64;
+                                pending_offset = end;
+                                if pending_offset >= pending.len() / 2 {
+                                    pending.drain(0..pending_offset);
+                                    pending_offset = 0;
+                                }
                                 if last_rate_log.elapsed() >= Duration::from_secs(5) {
                                     let secs = last_rate_log.elapsed().as_secs_f64();
                                     let bytes_per_sec = (bytes_since_log as f64 / secs).round();
@@ -507,4 +544,11 @@ fn rms_db_from_pcm_i16_le(bytes: &[u8]) -> Option<f32> {
         20.0 * rms.log10()
     };
     Some(db as f32)
+}
+
+fn chunk_bytes_for_rate(rate: u32) -> usize {
+    let chunk_ms = 20u32;
+    let bytes_per_sec = rate.saturating_mul(4);
+    let bytes = bytes_per_sec.saturating_mul(chunk_ms) / 1000;
+    bytes.max(4) as usize
 }

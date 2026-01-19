@@ -25,6 +25,7 @@ pub struct BridgeStatusRequest {
     pub rate: Option<u32>,
     pub channels: Option<u16>,
     pub format: Option<String>,
+    pub observed_rate: Option<u32>,
     pub rms_db: Option<f32>,
     pub last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -215,9 +215,21 @@ async fn run() -> Result<()> {
                         receiver,
                         error_receiver,
                         stream,
+                        observed_rate,
                         ..
                     } = session;
                     let _stream_guard = stream;
+                    let observed_handle = observed_rate.clone();
+                    let status_handle = status.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            let observed = observed_handle.lock().ok().and_then(|value| *value);
+                            if let Some(rate) = observed {
+                                status_handle.set_observed_rate(rate);
+                            }
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                    });
                     let params = stream::StreamParams {
                         ingest,
                         rx: receiver,
@@ -226,6 +238,7 @@ async fn run() -> Result<()> {
                         hold_duration: std::time::Duration::from_millis(current.vad_hold_ms),
                         vad_updates: Some(vad_rx.clone()),
                         status: status.clone(),
+                        output_rate: current.target_rate,
                     };
 
                     let current_key = current.stream_key();

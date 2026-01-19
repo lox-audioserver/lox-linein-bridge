@@ -46,6 +46,7 @@ pub struct CaptureSession {
     pub sample_rate: u32,
     pub channels: u16,
     pub format: SampleFormat,
+    pub observed_rate: Arc<Mutex<Option<u32>>>,
 }
 
 pub fn list_input_device_details() -> Result<Vec<crate::models::CaptureDeviceInfo>> {
@@ -114,13 +115,15 @@ pub fn start_capture(
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.into();
 
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(8);
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
     let (err_tx, err_rx) = mpsc::channel::<String>(4);
+    let observed_rate = Arc::new(Mutex::new(None));
     let resampler = Arc::new(Mutex::new(Resampler::new(
         config.sample_rate.0,
         config.channels,
         target_rate,
         resampler_mode,
+        Arc::clone(&observed_rate),
     )?));
 
     let err_fn = move |err| {
@@ -181,6 +184,7 @@ pub fn start_capture(
         sample_rate: config.sample_rate.0,
         channels: config.channels,
         format: sample_format,
+        observed_rate,
     })
 }
 
@@ -262,10 +266,17 @@ struct Resampler {
     rate_frames: u64,
     rate_start: Instant,
     last_rate_log: Instant,
+    observed_rate: Arc<Mutex<Option<u32>>>,
 }
 
 impl Resampler {
-    fn new(in_rate: u32, in_channels: u16, target_rate: u32, mode: ResamplerMode) -> Result<Self> {
+    fn new(
+        in_rate: u32,
+        in_channels: u16,
+        target_rate: u32,
+        mode: ResamplerMode,
+        observed_rate: Arc<Mutex<Option<u32>>>,
+    ) -> Result<Self> {
         let sinc = match mode {
             ResamplerMode::Linear => None,
             ResamplerMode::SincFast => Some(SincResampler::new(
@@ -290,6 +301,7 @@ impl Resampler {
             rate_frames: 0,
             rate_start: Instant::now(),
             last_rate_log: Instant::now(),
+            observed_rate,
         })
     }
 
@@ -348,6 +360,9 @@ impl Resampler {
                 self.mode.label()
             );
             self.last_rate_log = Instant::now();
+        }
+        if let Ok(mut slot) = self.observed_rate.lock() {
+            *slot = Some(observed);
         }
         self.rate_frames = 0;
         self.rate_start = Instant::now();

@@ -57,6 +57,7 @@ The bridge streams raw PCM over TCP:
 - Then continuous raw PCM `s16le`, `48 kHz`, `2 channels` (rate and resampler can be overridden by server)
 
 Status updates are sent separately and must not reset the audio stream.
+The bridge also reports `observed_rate` in status updates (measured input rate).
 
 ## Voice activity detection (VAD)
 
