@@ -1,3 +1,10 @@
+## [1.8.1](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.8.0...v1.8.1) (2026-01-19)
+
+
+### Bug Fixes
+
+* log audio buffer underruns during paced streaming ([b53328e](https://github.com/lox-audioserver/lox-linein-bridge/commit/b53328e71c0adf6361d009f06f62df785be6a53c))
+
 # [1.8.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.7.0...v1.8.0) (2026-01-19)
 
 
