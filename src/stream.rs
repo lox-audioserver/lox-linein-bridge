@@ -292,7 +292,7 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
                         while let Some(value) = pending.pop_front() {
                             payload.push(value);
                         }
-                        payload.extend(std::iter::repeat(0u8).take(missing));
+                        payload.extend(std::iter::repeat_n(0u8, missing));
                         if let Err(err) = writer.write_all(&payload).await {
                             params.status.set_last_error(Some(err.to_string()));
                             stream = None;
@@ -459,7 +459,7 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
                         while let Some(value) = pending.pop_front() {
                             buffer.push(value);
                         }
-                        buffer.extend(std::iter::repeat(0u8).take(missing));
+                        buffer.extend(std::iter::repeat_n(0u8, missing));
                         buffer
                     } else {
                         let mut buffer = Vec::with_capacity(chunk_bytes);
