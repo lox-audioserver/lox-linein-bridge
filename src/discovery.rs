@@ -111,6 +111,8 @@ fn normalize_path(path: String) -> String {
 }
 
 fn shutdown_mdns(mdns: &ServiceDaemon, service_type: &str) {
-    let _ = mdns.stop_browse(service_type);
-    let _ = mdns.shutdown();
+    let _ = service_type;
+    if let Ok(receiver) = mdns.shutdown() {
+        let _ = receiver.recv_timeout(Duration::from_millis(200));
+    }
 }

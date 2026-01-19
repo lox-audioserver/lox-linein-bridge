@@ -203,6 +203,8 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
     let max_pending = max_buffer_bytes_for_rate(params.output_rate);
     let mut pending = VecDeque::with_capacity(max_pending);
     let mut overrun_since = Instant::now();
+    let mut underrun_since = Instant::now();
+    let mut underrun_bytes: u64 = 0;
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -293,6 +295,7 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
                             payload.push(value);
                         }
                         payload.extend(std::iter::repeat_n(0u8, missing));
+                        underrun_bytes += missing as u64;
                         if let Err(err) = writer.write_all(&payload).await {
                             params.status.set_last_error(Some(err.to_string()));
                             stream = None;
@@ -327,6 +330,15 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
                         );
                         bytes_since_log = 0;
                         last_rate_log = Instant::now();
+                    }
+                    if underrun_since.elapsed() >= Duration::from_secs(5) && underrun_bytes > 0 {
+                        warn!(
+                            "audio buffer underrun: {} bytes padded in last {:.1}s",
+                            underrun_bytes,
+                            underrun_since.elapsed().as_secs_f64()
+                        );
+                        underrun_bytes = 0;
+                        underrun_since = Instant::now();
                     }
                 }
             }
@@ -370,6 +382,8 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
     let max_pending = max_buffer_bytes_for_rate(params.output_rate);
     let mut pending = VecDeque::with_capacity(max_pending);
     let mut overrun_since = Instant::now();
+    let mut underrun_since = Instant::now();
+    let mut underrun_bytes: u64 = 0;
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -460,6 +474,7 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
                             buffer.push(value);
                         }
                         buffer.extend(std::iter::repeat_n(0u8, missing));
+                        underrun_bytes += missing as u64;
                         buffer
                     } else {
                         let mut buffer = Vec::with_capacity(chunk_bytes);
@@ -488,6 +503,15 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
                         );
                         bytes_since_log = 0;
                         last_rate_log = Instant::now();
+                    }
+                    if underrun_since.elapsed() >= Duration::from_secs(5) && underrun_bytes > 0 {
+                        warn!(
+                            "audio buffer underrun: {} bytes padded in last {:.1}s",
+                            underrun_bytes,
+                            underrun_since.elapsed().as_secs_f64()
+                        );
+                        underrun_bytes = 0;
+                        underrun_since = Instant::now();
                     }
                 }
             }
