@@ -634,7 +634,7 @@ fn rms_db_from_pcm_i16_le(bytes: &[u8]) -> Option<f32> {
 }
 
 fn chunk_bytes_for_rate(rate: u32) -> usize {
-    let chunk_ms = 20u32;
+    let chunk_ms = 40u32;
     let bytes_per_sec = rate.saturating_mul(4);
     let bytes = bytes_per_sec.saturating_mul(chunk_ms) / 1000;
     bytes.max(4) as usize

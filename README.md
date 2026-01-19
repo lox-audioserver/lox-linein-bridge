@@ -25,6 +25,7 @@ sudo lox-linein-bridge install
 ```
 
 This writes the systemd unit, reloads systemd, and enables + starts the service.
+The systemd unit uses a higher scheduling priority for smoother audio timing.
 
 ## Run (systemd)
 

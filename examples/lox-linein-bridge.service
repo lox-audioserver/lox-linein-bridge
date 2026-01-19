@@ -4,10 +4,13 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/lox-linein-bridge run
+ExecStart=/usr/local/bin/lox-linein-bridge
+Nice=-5
+CPUSchedulingPolicy=rr
+CPUSchedulingPriority=50
+LimitRTPRIO=99
 Restart=always
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
-
