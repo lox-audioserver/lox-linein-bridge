@@ -1,3 +1,10 @@
+# [1.8.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.7.0...v1.8.0) (2026-01-19)
+
+
+### Features
+
+* pace streaming with buffered output and underrun handling ([b7a024e](https://github.com/lox-audioserver/lox-linein-bridge/commit/b7a024eeeddbe6278622e112294af5e1f24d42c2))
+
 # [1.7.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.6.3...v1.7.0) (2026-01-19)
 
 
