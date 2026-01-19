@@ -16,10 +16,9 @@ pub fn discover_server(
     preferred_name: Option<&str>,
     preferred_mac: Option<&str>,
 ) -> Result<DiscoveredServer> {
+    const SERVICE_TYPE: &str = "_loxaudio._tcp.local.";
     let mdns = ServiceDaemon::new().context("start mDNS daemon")?;
-    let receiver = mdns
-        .browse("_loxaudio._tcp.local.")
-        .context("browse mDNS services")?;
+    let receiver = mdns.browse(SERVICE_TYPE).context("browse mDNS services")?;
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut candidates = Vec::new();
 
@@ -62,10 +61,12 @@ pub fn discover_server(
     }
 
     if candidates.is_empty() {
+        shutdown_mdns(&mdns, SERVICE_TYPE);
         anyhow::bail!("no _loxaudio._tcp services found");
     }
 
     if candidates.len() == 1 {
+        shutdown_mdns(&mdns, SERVICE_TYPE);
         return Ok(candidates.remove(0));
     }
 
@@ -74,6 +75,7 @@ pub fn discover_server(
             .iter()
             .find(|server| server.txt.get("mac").map(|v| v == mac).unwrap_or(false))
         {
+            shutdown_mdns(&mdns, SERVICE_TYPE);
             return Ok(server.clone());
         }
     }
@@ -83,10 +85,12 @@ pub fn discover_server(
             .iter()
             .find(|server| server.txt.get("name").map(|v| v == name).unwrap_or(false))
         {
+            shutdown_mdns(&mdns, SERVICE_TYPE);
             return Ok(server.clone());
         }
     }
 
+    shutdown_mdns(&mdns, SERVICE_TYPE);
     Ok(candidates.remove(0))
 }
 
@@ -104,4 +108,9 @@ fn normalize_path(path: String) -> String {
     } else {
         format!("/{}", path)
     }
+}
+
+fn shutdown_mdns(mdns: &ServiceDaemon, service_type: &str) {
+    let _ = mdns.stop_browse(service_type);
+    let _ = mdns.shutdown();
 }

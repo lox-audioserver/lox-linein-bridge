@@ -50,176 +50,225 @@ async fn run() -> Result<()> {
         .to_string();
     let (ip, mac) = local_identity()?;
 
-    let server = loop {
-        match discovery::discover_server(
-            config.preferred_server_name.as_deref(),
-            config.preferred_server_mac.as_deref(),
-        ) {
-            Ok(server) => {
-                info!("discovered server: {}", server.base_url);
-                break server;
-            }
-            Err(err) => {
-                warn!("mDNS discovery failed: {}", err);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        }
-    };
-
-    let api =
-        server_api::ServerApi::new(&server.base_url, &server.register_path, &server.status_path)?;
-    info!("server: {}", server.base_url);
-
-    let capture_devices = audio::list_input_device_details()?;
-    let register = models::BridgeRegisterRequest {
-        bridge_id: config.bridge_id.clone(),
-        hostname,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        ip: ip.clone(),
-        mac: mac.clone(),
-        capture_devices: capture_devices.clone(),
-    };
-    info!("registering bridge {}", config.bridge_id);
-    let initial_config = api.register_bridge(&register).await?;
-    info!(
-        "registration response: assigned_input_id={:?}, capture_device={:?}",
-        initial_config.assigned_input_id, initial_config.capture_device
-    );
-
-    let runtime = RuntimeConfig::from_response(initial_config);
-    let (config_tx, mut config_rx) = tokio::sync::watch::channel(runtime.clone());
-    let (vad_tx, vad_rx) = tokio::sync::watch::channel((
-        runtime.vad_threshold_db,
-        std::time::Duration::from_millis(runtime.vad_hold_ms),
-    ));
-
-    let status = stream::StatusHandle::new("", "");
-    health::spawn(status.clone());
-
-    let status_api = api.clone();
-    let bridge_id = config.bridge_id.clone();
-    let status_handle = status.clone();
-    tokio::spawn(async move {
-        let mut runtime = runtime;
-        let mut last_devices_hash = None;
-        let mut devices = capture_devices;
-        loop {
-            let mut snapshot = status_handle.bridge_status();
-            let current_hash = hash_capture_devices(&devices);
-            if last_devices_hash != Some(current_hash) {
-                snapshot.capture_devices = Some(devices.clone());
-                last_devices_hash = Some(current_hash);
-            }
-            match status_api.post_status(&bridge_id, &snapshot).await {
-                Ok(update) => {
-                    if let Some(updated) = runtime.update(update) {
-                        info!(
-                            "config update: assigned_input_id={:?}, capture_device={:?}, vad_threshold_db={}, vad_hold_ms={}, target_rate={}, resampler={}",
-                            updated.assigned_input_id,
-                            updated.capture_device,
-                            updated.vad_threshold_db,
-                            updated.vad_hold_ms,
-                            updated.target_rate,
-                            updated.resampler.label()
-                        );
-                        let _ = vad_tx.send((
-                            updated.vad_threshold_db,
-                            std::time::Duration::from_millis(updated.vad_hold_ms),
-                        ));
-                        let _ = config_tx.send(updated);
-                    }
+    loop {
+        let server = loop {
+            match discovery::discover_server(
+                config.preferred_server_name.as_deref(),
+                config.preferred_server_mac.as_deref(),
+            ) {
+                Ok(server) => {
+                    info!("discovered server: {}", server.base_url);
+                    break server;
                 }
                 Err(err) => {
-                    tracing::debug!("status post failed: {}", err);
+                    warn!("mDNS discovery failed: {}", err);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            if let Ok(new_devices) = audio::list_input_device_details() {
-                devices = new_devices;
-            }
-        }
-    });
+        };
 
-    let mut backoff = Backoff::new();
-    loop {
-        let current = config_rx.borrow().clone();
-        if !current.is_ready() {
-            status.set_state("IDLE");
-            config_rx.changed().await?;
-            continue;
-        }
-        let ingest = match current.ingest_target() {
-            Some(target) => target,
-            None => {
+        let api = server_api::ServerApi::new(
+            &server.base_url,
+            &server.register_path,
+            &server.status_path,
+        )?;
+        info!("server: {}", server.base_url);
+
+        let capture_devices = audio::list_input_device_details()?;
+        let register = models::BridgeRegisterRequest {
+            bridge_id: config.bridge_id.clone(),
+            hostname: hostname.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            ip: ip.clone(),
+            mac: mac.clone(),
+            capture_devices: capture_devices.clone(),
+        };
+        info!("registering bridge {}", config.bridge_id);
+        let initial_config = api.register_bridge(&register).await?;
+        info!(
+            "registration response: assigned_input_id={:?}, capture_device={:?}",
+            initial_config.assigned_input_id, initial_config.capture_device
+        );
+
+        let runtime = RuntimeConfig::from_response(initial_config);
+        let (config_tx, mut config_rx) = tokio::sync::watch::channel(runtime.clone());
+        let (vad_tx, vad_rx) = tokio::sync::watch::channel((
+            runtime.vad_threshold_db,
+            std::time::Duration::from_millis(runtime.vad_hold_ms),
+        ));
+        let (rediscover_tx, mut rediscover_rx) = tokio::sync::watch::channel(false);
+
+        let status = stream::StatusHandle::new("", "");
+        health::spawn(status.clone());
+
+        let status_api = api.clone();
+        let bridge_id = config.bridge_id.clone();
+        let status_handle = status.clone();
+        let rediscover_rx_status = rediscover_rx.clone();
+        let rediscover_tx_status = rediscover_tx.clone();
+        tokio::spawn(async move {
+            let mut runtime = runtime;
+            let mut last_devices_hash = None;
+            let mut devices = capture_devices;
+            let mut failures = 0u32;
+            loop {
+                if *rediscover_rx_status.borrow() {
+                    break;
+                }
+                let mut snapshot = status_handle.bridge_status();
+                let current_hash = hash_capture_devices(&devices);
+                if last_devices_hash != Some(current_hash) {
+                    snapshot.capture_devices = Some(devices.clone());
+                    last_devices_hash = Some(current_hash);
+                }
+                match status_api.post_status(&bridge_id, &snapshot).await {
+                    Ok(update) => {
+                        failures = 0;
+                        if let Some(updated) = runtime.update(update) {
+                            info!(
+                                "config update: assigned_input_id={:?}, capture_device={:?}, vad_threshold_db={}, vad_hold_ms={}, target_rate={}, resampler={}",
+                                updated.assigned_input_id,
+                                updated.capture_device,
+                                updated.vad_threshold_db,
+                                updated.vad_hold_ms,
+                                updated.target_rate,
+                                updated.resampler.label()
+                            );
+                            let _ = vad_tx.send((
+                                updated.vad_threshold_db,
+                                std::time::Duration::from_millis(updated.vad_hold_ms),
+                            ));
+                            let _ = config_tx.send(updated);
+                        }
+                    }
+                    Err(err) => {
+                        failures = failures.saturating_add(1);
+                        tracing::debug!("status post failed: {}", err);
+                        if failures >= 3 {
+                            warn!("status posts failed repeatedly, re-discovering server");
+                            let _ = rediscover_tx_status.send(true);
+                            break;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if let Ok(new_devices) = audio::list_input_device_details() {
+                    devices = new_devices;
+                }
+            }
+        });
+
+        let mut backoff = Backoff::new();
+        loop {
+            if *rediscover_rx.borrow() {
+                break;
+            }
+            let current = config_rx.borrow().clone();
+            if !current.is_ready() {
                 status.set_state("IDLE");
-                config_rx.changed().await?;
+                tokio::select! {
+                    _ = config_rx.changed() => {}
+                    _ = rediscover_rx.changed() => {
+                        if *rediscover_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
                 continue;
             }
-        };
-        let capture_device = current.capture_device.clone().unwrap_or_default();
-        status.set_device(&capture_device);
-        status.set_ingest(&current.ingest_label());
-
-        match audio::start_capture(&capture_device, current.target_rate, current.resampler) {
-            Ok(session) => {
-                backoff.reset();
-                status.set_capture_info(
-                    session.sample_rate,
-                    session.channels,
-                    format!("{:?}", session.format),
-                );
-                info!(
-                    "capture format: {} Hz, {} channels, {:?} (target {} Hz, 2 channels, resampler={})",
-                    session.sample_rate,
-                    session.channels,
-                    session.format,
-                    current.target_rate,
-                    current.resampler.label()
-                );
-                let audio::CaptureSession {
-                    receiver,
-                    error_receiver,
-                    stream,
-                    ..
-                } = session;
-                let _stream_guard = stream;
-                let params = stream::StreamParams {
-                    ingest,
-                    rx: receiver,
-                    err_rx: error_receiver,
-                    threshold_db: current.vad_threshold_db,
-                    hold_duration: std::time::Duration::from_millis(current.vad_hold_ms),
-                    vad_updates: Some(vad_rx.clone()),
-                    status: status.clone(),
-                };
-
-                let current_key = current.stream_key();
-                let mut stream_task =
-                    tokio::spawn(async move { stream::stream_audio(params).await });
-                tokio::select! {
-                    result = &mut stream_task => {
-                        match result.context("stream task join")? {
-                            Ok(()) => {}
-                            Err(err) => {
-                                status.set_state("ERROR");
-                                status.set_last_error(Some(err.to_string()));
-                                warn!("streaming stopped: {}", err);
+            let ingest = match current.ingest_target() {
+                Some(target) => target,
+                None => {
+                    status.set_state("IDLE");
+                    tokio::select! {
+                        _ = config_rx.changed() => {}
+                        _ = rediscover_rx.changed() => {
+                            if *rediscover_rx.borrow() {
+                                break;
                             }
                         }
                     }
-                    _ = config_rx.changed() => {
-                        let next = config_rx.borrow().clone();
-                        if next.stream_key() != current_key {
-                            stream_task.abort();
+                    continue;
+                }
+            };
+            let capture_device = current.capture_device.clone().unwrap_or_default();
+            status.set_device(&capture_device);
+            status.set_ingest(&current.ingest_label());
+
+            match audio::start_capture(&capture_device, current.target_rate, current.resampler) {
+                Ok(session) => {
+                    backoff.reset();
+                    status.set_capture_info(
+                        session.sample_rate,
+                        session.channels,
+                        format!("{:?}", session.format),
+                    );
+                    info!(
+                        "capture format: {} Hz, {} channels, {:?} (target {} Hz, 2 channels, resampler={})",
+                        session.sample_rate,
+                        session.channels,
+                        session.format,
+                        current.target_rate,
+                        current.resampler.label()
+                    );
+                    let audio::CaptureSession {
+                        receiver,
+                        error_receiver,
+                        stream,
+                        ..
+                    } = session;
+                    let _stream_guard = stream;
+                    let params = stream::StreamParams {
+                        ingest,
+                        rx: receiver,
+                        err_rx: error_receiver,
+                        threshold_db: current.vad_threshold_db,
+                        hold_duration: std::time::Duration::from_millis(current.vad_hold_ms),
+                        vad_updates: Some(vad_rx.clone()),
+                        status: status.clone(),
+                    };
+
+                    let current_key = current.stream_key();
+                    let mut stream_task =
+                        tokio::spawn(async move { stream::stream_audio(params).await });
+                    tokio::select! {
+                        result = &mut stream_task => {
+                            match result.context("stream task join")? {
+                                Ok(()) => {}
+                                Err(err) => {
+                                    status.set_state("ERROR");
+                                    status.set_last_error(Some(err.to_string()));
+                                    warn!("streaming stopped: {}", err);
+                                }
+                            }
+                        }
+                        _ = config_rx.changed() => {
+                            let next = config_rx.borrow().clone();
+                            if next.stream_key() != current_key {
+                                stream_task.abort();
+                            }
+                        }
+                        _ = rediscover_rx.changed() => {
+                            if *rediscover_rx.borrow() {
+                                stream_task.abort();
+                                break;
+                            }
                         }
                     }
                 }
-            }
-            Err(err) => {
-                status.set_state("ERROR");
-                status.set_last_error(Some(err.to_string()));
-                warn!("capture failed: {}", err);
-                tokio::time::sleep(backoff.next_delay()).await;
+                Err(err) => {
+                    status.set_state("ERROR");
+                    status.set_last_error(Some(err.to_string()));
+                    warn!("capture failed: {}", err);
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff.next_delay()) => {}
+                        _ = rediscover_rx.changed() => {
+                            if *rediscover_rx.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
