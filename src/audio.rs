@@ -261,6 +261,7 @@ struct Resampler {
     sinc: Option<SincResampler>,
     rate_frames: u64,
     rate_start: Instant,
+    last_rate_log: Instant,
 }
 
 impl Resampler {
@@ -288,6 +289,7 @@ impl Resampler {
             sinc,
             rate_frames: 0,
             rate_start: Instant::now(),
+            last_rate_log: Instant::now(),
         })
     }
 
@@ -323,15 +325,29 @@ impl Resampler {
             return;
         }
         let observed = (self.rate_frames as f64 / elapsed.as_secs_f64()).round() as u32;
-        if observed > 0 && observed != self.in_rate {
+        if observed == 0 {
+            return;
+        }
+
+        if observed != self.in_rate {
             info!(
-                "observed input rate: {} Hz (was {} Hz, resampler={})",
+                "observed input rate: {} Hz (was {} Hz, target {} Hz, resampler={})",
                 observed,
                 self.in_rate,
+                self.target_rate,
                 self.mode.label()
             );
             self.in_rate = observed;
             self.reset_resampler();
+            self.last_rate_log = Instant::now();
+        } else if self.last_rate_log.elapsed() >= Duration::from_secs(10) {
+            info!(
+                "observed input rate: {} Hz (target {} Hz, resampler={})",
+                observed,
+                self.target_rate,
+                self.mode.label()
+            );
+            self.last_rate_log = Instant::now();
         }
         self.rate_frames = 0;
         self.rate_start = Instant::now();
