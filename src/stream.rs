@@ -200,12 +200,13 @@ async fn stream_audio_tcp(params: &mut StreamParams) -> Result<()> {
     let mut last_rate_log = Instant::now();
     let mut bytes_since_log: u64 = 0;
     let chunk_bytes = chunk_bytes_for_rate(params.output_rate);
+    let chunk_interval = chunk_interval();
     let max_pending = max_buffer_bytes_for_rate(params.output_rate);
     let mut pending = VecDeque::with_capacity(max_pending);
     let mut overrun_since = Instant::now();
     let mut underrun_since = Instant::now();
     let mut underrun_bytes: u64 = 0;
-    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    let mut tick = tokio::time::interval(chunk_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut stream: Option<TcpStream> = None;
@@ -379,12 +380,13 @@ async fn stream_audio_ws(params: &mut StreamParams) -> Result<()> {
     let mut last_rate_log = Instant::now();
     let mut bytes_since_log: u64 = 0;
     let chunk_bytes = chunk_bytes_for_rate(params.output_rate);
+    let chunk_interval = chunk_interval();
     let max_pending = max_buffer_bytes_for_rate(params.output_rate);
     let mut pending = VecDeque::with_capacity(max_pending);
     let mut overrun_since = Instant::now();
     let mut underrun_since = Instant::now();
     let mut underrun_bytes: u64 = 0;
-    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    let mut tick = tokio::time::interval(chunk_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut stream = None;
@@ -638,6 +640,10 @@ fn chunk_bytes_for_rate(rate: u32) -> usize {
     let bytes_per_sec = rate.saturating_mul(4);
     let bytes = bytes_per_sec.saturating_mul(chunk_ms) / 1000;
     bytes.max(4) as usize
+}
+
+fn chunk_interval() -> Duration {
+    Duration::from_millis(40)
 }
 
 fn max_buffer_bytes_for_rate(rate: u32) -> usize {
