@@ -1,3 +1,10 @@
+## [1.6.1](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.6.0...v1.6.1) (2026-01-19)
+
+
+### Bug Fixes
+
+* log bridge stream throughput for rate debugging ([2e24eab](https://github.com/lox-audioserver/lox-linein-bridge/commit/2e24eab78ed44d3eb5ec6b3e5ecf147d38b0201b))
+
 # [1.6.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.5.0...v1.6.0) (2026-01-19)
 
 
