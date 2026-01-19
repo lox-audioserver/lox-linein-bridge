@@ -1,3 +1,11 @@
+# [1.7.0](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.6.3...v1.7.0) (2026-01-19)
+
+
+### Features
+
+* improve streaming stability and report observed input rate ([8c116eb](https://github.com/lox-audioserver/lox-linein-bridge/commit/8c116eb8d37ccd1ea9e7493936c0b71f86207f9f))
+* rediscover server after repeated status failures ([6d5e4aa](https://github.com/lox-audioserver/lox-linein-bridge/commit/6d5e4aa311c7144bb8d99417d2d394204cde9a3e))
+
 ## [1.6.3](https://github.com/lox-audioserver/lox-linein-bridge/compare/v1.6.2...v1.6.3) (2026-01-19)
 
 
