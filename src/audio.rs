@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 pub const TARGET_CHANNELS: u16 = 2;
 
@@ -203,6 +203,7 @@ fn handle_samples_f32(
             Ok(guard) => guard,
             Err(_) => return,
         };
+        resampler.observe_input(data.len(), channels);
         if resampler.needs_resample_rate() {
             resampler.process(data, channels)
         } else {
@@ -299,7 +300,6 @@ impl Resampler {
             return Vec::new();
         }
 
-        self.track_input_rate(input.len(), in_channels);
         match self.mode {
             ResamplerMode::Linear => {
                 self.linear
@@ -315,7 +315,7 @@ impl Resampler {
         }
     }
 
-    fn track_input_rate(&mut self, samples: usize, in_channels: u16) {
+    fn observe_input(&mut self, samples: usize, in_channels: u16) {
         let frames = samples / in_channels as usize;
         self.rate_frames = self.rate_frames.saturating_add(frames as u64);
         let elapsed = self.rate_start.elapsed();
@@ -324,6 +324,12 @@ impl Resampler {
         }
         let observed = (self.rate_frames as f64 / elapsed.as_secs_f64()).round() as u32;
         if observed > 0 && observed != self.in_rate {
+            info!(
+                "observed input rate: {} Hz (was {} Hz, resampler={})",
+                observed,
+                self.in_rate,
+                self.mode.label()
+            );
             self.in_rate = observed;
             self.reset_resampler();
         }
